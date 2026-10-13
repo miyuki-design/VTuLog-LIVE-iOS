@@ -388,7 +388,51 @@ const SIGNALING_BASE_URL = 'https://vtulog-signal.miminoz0822.workers.dev'
 const SIGNALING_ROOM_ID = 'mimi-live'
 const GOOGLE_CLIENT_ID = '1076202528911-6letsd2va5jkp1tvf0hc9li0l2ebjtmc.apps.googleusercontent.com'
 const GOOGLE_REDIRECT_URI = `${window.location.origin}/oauth/callback`
+// Google iOS OAuth client is separate from the existing web OAuth client.
+// Register an iOS OAuth client in Google Cloud with bundle ID dev.miminoz.vtuloglive.
+// On-device setting (not a secret); Web continues using GOOGLE_CLIENT_ID.
+const GOOGLE_IOS_CLIENT_KEY = 'vtulog-google-ios-client-id'
+const GOOGLE_IOS_REDIRECT_URI = 'dev.miminoz.vtuloglive:/oauth2redirect'
+const GOOGLE_IOS_OAUTH_PENDING_KEY = 'vtulog-google-ios-oauth-pending'
+const GOOGLE_IOS_REFRESH_TOKEN_KEY = 'vtulog-google-ios-refresh-token'
+const GOOGLE_IOS_EXPIRES_KEY = 'vtulog-google-ios-expires-at'
+
 const YOUTUBE_SCOPE = 'https://www.googleapis.com/auth/youtube'
+
+function toBase64Url(bytes: Uint8Array): string {
+  let binary = ''
+  bytes.forEach(byte => { binary += String.fromCharCode(byte) })
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+async function makeGooglePkce() {
+  const verifier = toBase64Url(crypto.getRandomValues(new Uint8Array(32)))
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))
+  return { verifier, challenge: toBase64Url(new Uint8Array(digest)) }
+}
+
+type GoogleTokenResponse = { access_token?: string; refresh_token?: string; expires_in?: number; error?: string; error_description?: string }
+async function googleNativeTokenRequest(params: URLSearchParams): Promise<GoogleTokenResponse> {
+  // Native HTTP avoids cross-origin WebView restrictions at the OAuth token endpoint.
+  const response = await CapacitorHttp.post({
+    url: 'https://oauth2.googleapis.com/token',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+    data: params.toString(),
+  })
+  const body: GoogleTokenResponse = typeof response.data === 'string' ? JSON.parse(response.data) : response.data
+  if (response.status < 200 || response.status >= 300 || !body?.access_token) {
+    throw new Error(body?.error_description || body?.error || `Google token HTTP ${response.status}`)
+  }
+  return body
+}
+
+function storeGoogleNativeTokens(tokens: GoogleTokenResponse) {
+  if (!tokens.access_token) throw new Error('Googleからアクセストークンが返されませんでした')
+  localStorage.setItem('youtube-access-token', tokens.access_token)
+  if (tokens.refresh_token) localStorage.setItem(GOOGLE_IOS_REFRESH_TOKEN_KEY, tokens.refresh_token)
+  if (tokens.expires_in) localStorage.setItem(GOOGLE_IOS_EXPIRES_KEY, String(Date.now() + Math.max(0, tokens.expires_in - 90) * 1000))
+}
+
 // Twitchタイトル変更には channel:manage:broadcast のユーザー承認が必須。
 // Client ID は公開情報で、ストリームキーやClient Secretは不要。
 const TWITCH_SCOPE = 'channel:manage:broadcast'
@@ -606,6 +650,39 @@ const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [twitchTitleMessage, setTwitchTitleMessage] = useState('')
   const [twitchAuthMessage, setTwitchAuthMessage] = useState('')
 
+  const [googleIosClientId, setGoogleIosClientId] = useState(() => localStorage.getItem(GOOGLE_IOS_CLIENT_KEY) ?? '')
+  const [googleIosAuthMessage, setGoogleIosAuthMessage] = useState('')
+  useEffect(() => { localStorage.setItem(GOOGLE_IOS_CLIENT_KEY, googleIosClientId.trim()) }, [googleIosClientId])
+
+  // Refresh the native OAuth access token before expiration, and when returning to the app.
+  const refreshGoogleNativeToken = useCallback(async () => {
+    if (!Capacitor.isNativePlatform()) return false
+    const refreshToken = localStorage.getItem(GOOGLE_IOS_REFRESH_TOKEN_KEY)
+    const clientId = localStorage.getItem(GOOGLE_IOS_CLIENT_KEY)
+    if (!refreshToken || !clientId) return false
+    try {
+      const params = new URLSearchParams({ client_id: clientId, refresh_token: refreshToken, grant_type: 'refresh_token' })
+      storeGoogleNativeTokens(await googleNativeTokenRequest(params))
+      return true
+    } catch (error) {
+      console.warn('Googleトークン更新に失敗:', error)
+      setGoogleIosAuthMessage('YouTube認証の更新に失敗しました。もう一度接続してください')
+      return false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return
+    const check = () => {
+      const expires = Number(localStorage.getItem(GOOGLE_IOS_EXPIRES_KEY) ?? 0)
+      if (expires && Date.now() >= expires) void refreshGoogleNativeToken()
+    }
+    check()
+    const interval = window.setInterval(check, 60 * 1000)
+    return () => window.clearInterval(interval)
+  }, [refreshGoogleNativeToken])
+
+
   useEffect(() => {
     localStorage.setItem('vtulog-twitch-client-id', twitchClientId)
   }, [twitchClientId])
@@ -700,6 +777,61 @@ const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
     }).catch(() => {})
     return () => { disposed = true; if (listener) void listener.remove() }
   }, [handleTwitchNativeOAuth])
+
+
+  const handleGoogleNativeOAuth = useCallback(async (callbackUrl: string) => {
+    if (!Capacitor.isNativePlatform() || !callbackUrl.startsWith(GOOGLE_IOS_REDIRECT_URI)) return
+    setShowStreamSettings(true)
+    setStreamSettingsPage('youtube')
+    const url = new URL(callbackUrl)
+    if (url.protocol !== 'dev.miminoz.vtuloglive:' || url.pathname !== '/oauth2redirect') return
+    const state = url.searchParams.get('state') ?? ''
+    const pendingRaw = localStorage.getItem(GOOGLE_IOS_OAUTH_PENDING_KEY)
+    let pending: { state: string; verifier: string; clientId: string; startedAt: number } | null = null
+    try { if (pendingRaw) pending = JSON.parse(pendingRaw) } catch { /* ignore */ }
+    if (!pending || pending.state !== state || Date.now() - pending.startedAt > 10 * 60 * 1000) {
+      setGoogleIosAuthMessage('Google認証の状態が一致しません。最初からやり直してください')
+      return
+    }
+    localStorage.removeItem(GOOGLE_IOS_OAUTH_PENDING_KEY)
+    if (url.searchParams.has('error')) {
+      setGoogleIosAuthMessage(`Google認証を完了できませんでした：${url.searchParams.get('error')}`)
+      return
+    }
+    const code = url.searchParams.get('code')
+    if (!code) {
+      setGoogleIosAuthMessage('Googleから認証コードが返されませんでした')
+      return
+    }
+    try {
+      setGoogleIosAuthMessage('Googleとの接続を完了しています…')
+      const params = new URLSearchParams({
+        client_id: pending.clientId,
+        code,
+        code_verifier: pending.verifier,
+        redirect_uri: GOOGLE_IOS_REDIRECT_URI,
+        grant_type: 'authorization_code',
+      })
+      storeGoogleNativeTokens(await googleNativeTokenRequest(params))
+      setGoogleIosAuthMessage('✅ YouTube連携が完了しました')
+      try { await Browser.close() } catch { /* browser may already be dismissed */ }
+    } catch (error) {
+      setGoogleIosAuthMessage(`YouTube連携に失敗しました：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return
+    let disposed = false
+    let listener: { remove: () => Promise<void> } | undefined
+    void CapacitorApp.addListener('appUrlOpen', ({ url }) => {
+      if (!disposed) void handleGoogleNativeOAuth(url)
+    }).then(handle => { if (disposed) void handle.remove(); else listener = handle })
+    void CapacitorApp.getLaunchUrl().then(data => {
+      if (!disposed && data?.url) void handleGoogleNativeOAuth(data.url)
+    }).catch(() => {})
+    return () => { disposed = true; if (listener) void listener.remove() }
+  }, [handleGoogleNativeOAuth])
 
   const validateTwitchTitleToken = useCallback(async () => {
     if (!twitchAuthToken) {
@@ -1390,7 +1522,37 @@ const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   }, [saveAvatarTransform])
 
   // ── YouTube OAuth ──
-const connectYouTube = useCallback(() => {
+const connectYouTube = useCallback(async () => {
+  if (Capacitor.isNativePlatform()) {
+    const clientId = googleIosClientId.trim()
+    if (!/^[0-9]+-[a-zA-Z0-9_-]+\.apps\.googleusercontent\.com$/.test(clientId)) {
+      setGoogleIosAuthMessage('iOS用GoogleクライアントIDを入力してください（Web用とは別です）')
+      return
+    }
+    try {
+      const { verifier, challenge } = await makeGooglePkce()
+      const state = `vtulog-google-${crypto.randomUUID()}`
+      localStorage.setItem(GOOGLE_IOS_OAUTH_PENDING_KEY, JSON.stringify({ state, verifier, clientId, startedAt: Date.now() }))
+      const params = new URLSearchParams({
+        client_id: clientId,
+        redirect_uri: GOOGLE_IOS_REDIRECT_URI,
+        response_type: 'code',
+        scope: YOUTUBE_SCOPE,
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+        state,
+        access_type: 'offline',
+        prompt: 'consent',
+      })
+      setGoogleIosAuthMessage('Googleの認証画面を開いています…')
+      await Browser.open({ url: `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}` })
+    } catch (error) {
+      localStorage.removeItem(GOOGLE_IOS_OAUTH_PENDING_KEY)
+      setGoogleIosAuthMessage(`Google認証を開始できませんでした：${error instanceof Error ? error.message : String(error)}`)
+    }
+    return
+  }
+  // Preserve the existing Web OAuth flow.
   const params = new URLSearchParams({
     client_id: GOOGLE_CLIENT_ID,
     redirect_uri: GOOGLE_REDIRECT_URI,
@@ -1399,10 +1561,8 @@ const connectYouTube = useCallback(() => {
     include_granted_scopes: 'true',
     prompt: 'consent',
   })
-
-  window.location.href =
-    `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`
-}, [])
+  window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`
+}, [googleIosClientId])
 
 // ── YouTube LIVE + コメント取得 ──
 const fetchYouTubeLive = useCallback(async (silent = false) => {
@@ -3717,6 +3877,30 @@ useEffect(() => {
   </div>
 )}
           
+{streamSettingsPage === 'youtube' && Capacitor.isNativePlatform() && (
+  <div style={{ marginTop: '12px', padding: '12px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(255,255,255,0.04)' }}>
+    <label style={{ display: 'block', color: '#fff', fontSize: '12px', marginBottom: '8px' }}>
+      📱 Google iOS用クライアントID（Web版とは別）
+    </label>
+    <input
+      type="text"
+      autoCapitalize="none"
+      autoCorrect="off"
+      value={googleIosClientId}
+      onChange={event => setGoogleIosClientId(event.target.value.trim())}
+      placeholder="xxxxxxxx-xxxx.apps.googleusercontent.com"
+      style={{ display: 'block', width: '100%', boxSizing: 'border-box', borderRadius: '8px', padding: '10px', fontSize: '12px', background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.25)', color: '#fff' }}
+    />
+    <p style={{ fontSize: '11px', marginTop: '8px', color: '#bcb1d2', wordBreak: 'break-word' }}>
+      Google Cloudで「iOS」のOAuthクライアントを作成。Bundle ID: dev.miminoz.vtuloglive
+    </p>
+    <p style={{ fontSize: '11px', color: '#bcb1d2', wordBreak: 'break-word' }}>
+      OAuth戻り先: {GOOGLE_IOS_REDIRECT_URI}
+    </p>
+    {!!googleIosAuthMessage && <p role="status" style={{ color: '#00E5FF', marginTop: '8px', fontSize: '12px' }}>{googleIosAuthMessage}</p>}
+  </div>
+)}
+
 {streamSettingsPage === 'youtube' && (
   <button
     onClick={connectYouTube}
