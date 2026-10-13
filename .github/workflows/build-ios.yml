@@ -58,6 +58,15 @@ jobs:
           /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string vtuloglive' "$PLIST" 2>/dev/null \
             || /usr/libexec/PlistBuddy -c 'Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 vtuloglive' "$PLIST"
 
+      - name: Add native Google OAuth callback scheme
+        run: |
+          PLIST="ios/App/App/Info.plist"
+          # Custom URL scheme for iOS installed-app OAuth; separate from Twitch.
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:1 dict' "$PLIST"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:1:CFBundleURLName string dev.miminoz.vtuloglive.google' "$PLIST"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:1:CFBundleURLSchemes array' "$PLIST"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:1:CFBundleURLSchemes:0 string dev.miminoz.vtuloglive' "$PLIST"
+
       - name: Build unsigned iOS app
         run: |
           xcodebuild \
