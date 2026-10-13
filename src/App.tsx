@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Capacitor, CapacitorHttp } from '@capacitor/core'
+import { App as CapacitorApp } from '@capacitor/app'
+import { Browser } from '@capacitor/browser'
 import { useLive2D, LIVE2D_CANVAS_SIZE, type Live2DDiagnostics, type NormalizedFileInfo } from './useLive2D'
 
 type AppState = 'idle' | 'live'
@@ -392,6 +394,9 @@ const YOUTUBE_SCOPE = 'https://www.googleapis.com/auth/youtube'
 const TWITCH_SCOPE = 'channel:manage:broadcast'
 const TWITCH_TOKEN_KEY = 'vtulog-twitch-title-access-token'
 const TWITCH_OAUTH_PENDING_KEY = 'vtulog-twitch-title-oauth-pending'
+// Twitch accepts HTTPS redirect URIs; the landing page then opens the installed iOS app.
+const TWITCH_IOS_REDIRECT_URI = 'https://vtulog-live.miminoz0822.workers.dev/twitch-native-callback.html'
+const TWITCH_IOS_CALLBACK_PREFIX = 'vtuloglive://oauth/callback'
 
 async function getIceServers(): Promise<RTCIceServer[]> {
   const response = await fetch(
@@ -616,14 +621,14 @@ const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
     setTwitchAuthMessage('タイトル変更用のTwitch連携を解除しました')
   }, [])
 
-  const connectTwitchTitle = useCallback(() => {
+  const connectTwitchTitle = useCallback(async () => {
     const clientId = twitchClientId.trim()
     if (!/^[a-z0-9]{10,64}$/i.test(clientId)) {
       setTwitchAuthMessage('Twitch開発者コンソールのClient IDを入力してください')
       return
     }
-    // Twitchへは配信アプリ自身のURLへ戻る。これと同じURLをTwitchに登録する。
-    const redirectUri = `${window.location.origin}${window.location.pathname}`
+    const native = Capacitor.isNativePlatform()
+    const redirectUri = native ? TWITCH_IOS_REDIRECT_URI : `${window.location.origin}${window.location.pathname}`
     const state = `vtulog-twitch-${crypto.randomUUID()}`
     localStorage.setItem(TWITCH_OAUTH_PENDING_KEY, JSON.stringify({ state, startedAt: Date.now() }))
     const params = new URLSearchParams({
@@ -633,8 +638,68 @@ const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
       scope: TWITCH_SCOPE,
       state,
     })
-    window.location.assign(`https://id.twitch.tv/oauth2/authorize?${params.toString()}`)
+    const authorizeUrl = `https://id.twitch.tv/oauth2/authorize?${params.toString()}`
+    try {
+      setTwitchAuthMessage('Twitchでタイトル変更を許可してください')
+      if (native) await Browser.open({ url: authorizeUrl })
+      else window.location.assign(authorizeUrl)
+    } catch (error) {
+      localStorage.removeItem(TWITCH_OAUTH_PENDING_KEY)
+      setTwitchAuthMessage(`Twitch認証画面を開けませんでした：${error instanceof Error ? error.message : String(error)}`)
+    }
   }, [twitchClientId])
+
+  // Receive only the OAuth callback registered to this application, never unrelated deep links.
+  // The state value is kept on-device and must match before accepting an access token.
+  const handleTwitchNativeOAuth = useCallback(async (callbackUrl: string) => {
+    if (!Capacitor.isNativePlatform() || !callbackUrl.startsWith(TWITCH_IOS_CALLBACK_PREFIX)) return
+    setShowStreamSettings(true)
+    setStreamSettingsPage('twitch')
+    const url = new URL(callbackUrl)
+    if (url.protocol !== 'vtuloglive:' || url.hostname !== 'oauth' || url.pathname !== '/callback') return
+    const hash = new URLSearchParams(url.hash.replace(/^#/, ''))
+    const query = url.searchParams
+    const oauthState = hash.get('state') ?? query.get('state') ?? ''
+    const pendingRaw = localStorage.getItem(TWITCH_OAUTH_PENDING_KEY)
+    let validState = false
+    try {
+      if (pendingRaw) {
+        const pending: { state: string; startedAt: number } = JSON.parse(pendingRaw)
+        validState = pending.state === oauthState && Date.now() - pending.startedAt < 10 * 60 * 1000
+      }
+    } catch { /* ignore malformed state */ }
+    if (!validState) {
+      setTwitchAuthMessage('Twitchの認証状態が一致しません。もう一度連携してください')
+      return
+    }
+    localStorage.removeItem(TWITCH_OAUTH_PENDING_KEY)
+    if (hash.get('error') || query.get('error')) {
+      setTwitchAuthMessage('Twitch連携がキャンセルされたか拒否されました')
+      return
+    }
+    const accessToken = hash.get('access_token')
+    if (!accessToken) {
+      setTwitchAuthMessage('Twitchから認証トークンが返されませんでした')
+      return
+    }
+    localStorage.setItem(TWITCH_TOKEN_KEY, accessToken)
+    setTwitchAuthToken(accessToken)
+    setTwitchAuthMessage('Twitch連携が完了しました。権限を確認します…')
+    try { await Browser.close() } catch { /* the browser may already be closed */ }
+  }, [])
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return
+    let disposed = false
+    let listener: { remove: () => Promise<void> } | undefined
+    void CapacitorApp.addListener('appUrlOpen', ({ url }) => {
+      if (!disposed) void handleTwitchNativeOAuth(url)
+    }).then(handle => { if (disposed) void handle.remove(); else listener = handle })
+    void CapacitorApp.getLaunchUrl().then(data => {
+      if (!disposed && data?.url) void handleTwitchNativeOAuth(data.url)
+    }).catch(() => {})
+    return () => { disposed = true; if (listener) void listener.remove() }
+  }, [handleTwitchNativeOAuth])
 
   const validateTwitchTitleToken = useCallback(async () => {
     if (!twitchAuthToken) {
@@ -982,6 +1047,8 @@ const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // ── OAuth callback: TwitchとYouTubeのトークンを混同しない ──
   useEffect(() => {
+    // Native Twitch return is handled by the registered custom URL scheme above.
+    if (Capacitor.isNativePlatform()) return
     const hash = window.location.hash
     const params = new URLSearchParams(hash.startsWith('#') ? hash.slice(1) : '')
     const search = new URLSearchParams(window.location.search)
@@ -3516,11 +3583,11 @@ useEffect(() => {
           </p>
           <div style={{ fontSize: '10px', color: '#cbb3ff', overflowWrap: 'anywhere',
             background: 'rgba(0,0,0,0.3)', padding: '7px', borderRadius: '8px', marginTop: '4px' }}>
-            {`${window.location.origin}${window.location.pathname}`}
+            {Capacitor.isNativePlatform() ? TWITCH_IOS_REDIRECT_URI : `${window.location.origin}${window.location.pathname}`}
           </div>
           <button
             type="button"
-            onClick={() => void navigator.clipboard?.writeText(`${window.location.origin}${window.location.pathname}`)}
+            onClick={() => void navigator.clipboard?.writeText(Capacitor.isNativePlatform() ? TWITCH_IOS_REDIRECT_URI : `${window.location.origin}${window.location.pathname}`)}
             style={{ fontSize: '11px', marginTop: '5px', color: '#cbb3ff', textDecoration: 'underline' }}
           >
             リダイレクトURLをコピー
