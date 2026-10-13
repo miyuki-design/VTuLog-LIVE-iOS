@@ -4,11 +4,12 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview",
-    "format": "oxfmt"
-  },
+  "dev": "vite",
+  "build": "vite build",
+  "build:ios": "vite build --config vite.config.ios.ts",
+  "preview": "vite preview",
+  "format": "oxfmt"
+},
   "dependencies": {
     "jose": "^6.2.12",
     "pixi-live2d-display": "^0.4.0",
