@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { Capacitor, CapacitorHttp } from '@capacitor/core'
 import { useLive2D, LIVE2D_CANVAS_SIZE, type Live2DDiagnostics, type NormalizedFileInfo } from './useLive2D'
 
 type AppState = 'idle' | 'live'
@@ -323,6 +324,62 @@ function makePrivacyStandbyCanvas(): HTMLCanvasElement {
   ctx.fillText('PLEASE STAND BY', CW / 2, CH - 148)
 
   return offscreen
+}
+
+// 配信先管理: iOSアプリはcapacitor://localhostではなく公開WorkerへネイティブHTTP接続する。
+// Web版は従来通り同一オリジンの /api/target を利用する。
+const TARGET_WORKER_URL = 'https://vtulog-live.miminoz0822.workers.dev/api/target'
+type StreamTargetResponse = { target?: 'youtube' | 'twitch'; error?: string; success?: boolean }
+
+async function requestStreamTarget(target?: 'youtube' | 'twitch'): Promise<StreamTargetResponse> {
+  const isNative = Capacitor.isNativePlatform()
+  const url = isNative ? TARGET_WORKER_URL : '/api/target'
+  let status: number
+  let data: unknown
+
+  if (isNative) {
+    // CapacitorHttpは@capacitor/coreに同梱。CORS回避のためネイティブ通信を使う。
+    const response = target
+      ? await CapacitorHttp.post({
+          url,
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          data: { target },
+        })
+      : await CapacitorHttp.get({ url, headers: { 'Accept': 'application/json' } })
+    status = response.status
+    data = response.data
+  } else {
+    const response = await fetch(url, {
+      method: target ? 'POST' : 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      ...(target ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target }) } : {}),
+    })
+    status = response.status
+    const bodyText = await response.text()
+    try {
+      data = JSON.parse(bodyText)
+    } catch {
+      throw new Error(`サーバーからJSON以外の応答がありました（HTTP ${status}）`)
+    }
+  }
+
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data) } catch {
+      throw new Error(`サーバーからJSON以外の応答がありました（HTTP ${status}）`)
+    }
+  }
+  if (!data || typeof data !== 'object') {
+    throw new Error(`配信先APIの応答形式が不正です（HTTP ${status}）`)
+  }
+  const result = data as StreamTargetResponse
+  if (status < 200 || status >= 300) {
+    throw new Error(result.error || `HTTP ${status}`)
+  }
+  if (result.target !== 'youtube' && result.target !== 'twitch') {
+    throw new Error(result.error || '配信先の応答にYouTube/Twitchの情報がありません')
+  }
+  return result
 }
 
 const SIGNALING_BASE_URL = 'https://vtulog-signal.miminoz0822.workers.dev'
@@ -673,11 +730,7 @@ const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
     setStreamTargetBusy(true)
     setStreamTargetMessage('')
     try {
-      const response = await fetch('/api/target', { credentials: 'same-origin', cache: 'no-store' })
-      const data = await response.json()
-      if (!response.ok || !['youtube', 'twitch'].includes(data.target)) {
-        throw new Error(data.error ?? `HTTP ${response.status}`)
-      }
+      const data = await requestStreamTarget()
       setStreamTarget(data.target)
       localStorage.setItem('vtulog-stream-target', data.target)
     } catch (error) {
@@ -694,15 +747,9 @@ const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
     setStreamTargetBusy(true)
     setStreamTargetMessage('')
     try {
-      const response = await fetch('/api/target', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target }),
-      })
-      const data = await response.json()
-      if (!response.ok || data.target !== target) {
-        throw new Error(data.error ?? `HTTP ${response.status}`)
+      const data = await requestStreamTarget(target)
+      if (data.target !== target) {
+        throw new Error('切り替え後の配信先が要求と一致しません')
       }
       setStreamTarget(target)
       localStorage.setItem('vtulog-stream-target', target)
