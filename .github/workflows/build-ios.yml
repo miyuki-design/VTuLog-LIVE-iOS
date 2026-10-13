@@ -28,6 +28,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
 
+      - name: Add native OAuth plugins (Capacitor 7)
+        run: |
+          pnpm add @capacitor/app@7.1.2 @capacitor/browser@7.0.2
+
       - name: Build iOS web assets
         run: pnpm run build:ios
 
@@ -37,17 +41,22 @@ jobs:
       - name: Sync Capacitor
         run: pnpm exec cap sync ios
 
-      - name: Configure camera and microphone permissions
+      - name: Configure camera, microphone and OAuth callback
         run: |
           PLIST="ios/App/App/Info.plist"
 
-          /usr/libexec/PlistBuddy \
-            -c "Add :NSCameraUsageDescription string VTuLog LIVE uses the camera for live streaming." \
-            "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Set :NSCameraUsageDescription VTuLog LIVE uses the camera for live streaming." "$PLIST" \
+            || /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string VTuLog LIVE uses the camera for live streaming." "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :NSMicrophoneUsageDescription VTuLog LIVE uses the microphone for live streaming." "$PLIST" \
+            || /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string VTuLog LIVE uses the microphone for live streaming." "$PLIST"
 
-          /usr/libexec/PlistBuddy \
-            -c "Add :NSMicrophoneUsageDescription string VTuLog LIVE uses the microphone for live streaming." \
-            "$PLIST" || true
+          # Enables vtuloglive://oauth/callback to reopen the installed iOS app.
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes array' "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0 dict' "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleURLName string dev.miminoz.vtuloglive.oauth' "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleURLSchemes array' "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string vtuloglive' "$PLIST" 2>/dev/null \
+            || /usr/libexec/PlistBuddy -c 'Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 vtuloglive' "$PLIST"
 
       - name: Build unsigned iOS app
         run: |
