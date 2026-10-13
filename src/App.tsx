@@ -3358,20 +3358,7 @@ useEffect(() => {
         <p style={{ fontSize: '12px', color: 'var(--color-muted)', marginBottom: '12px' }}>
           現在の配信先：{streamTarget === 'youtube' ? '📺 YouTube' : streamTarget === 'twitch' ? '💜 Twitch' : '未取得'}
         </p>
-        {streamTarget === null && (
-          <button
-            type="button"
-            onClick={() => { window.location.assign('/api/target?login=1') }}
-            style={{
-              display: 'block', width: '100%', marginBottom: '12px',
-              padding: '12px', borderRadius: '10px', border: '1px solid rgba(0,229,255,0.5)',
-              background: 'rgba(0,229,255,0.12)', color: '#fff', fontWeight: 600,
-              cursor: 'pointer',
-            }}
-          >
-            🔐 配信先の認証を開く
-          </button>
-        )}
+       
         <div style={{ display: 'flex', gap: '10px' }}>
           {(['youtube', 'twitch'] as const).map(target => (
             <button
