@@ -1,0 +1,75 @@
+name: Build VTuLog LIVE iOS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build iOS web assets
+        run: pnpm run build:ios
+
+      - name: Generate iOS project
+        run: pnpm exec cap add ios
+
+      - name: Sync Capacitor
+        run: pnpm exec cap sync ios
+
+      - name: Configure camera and microphone permissions
+        run: |
+          PLIST="ios/App/App/Info.plist"
+
+          /usr/libexec/PlistBuddy \
+            -c "Add :NSCameraUsageDescription string VTuLog LIVE uses the camera for live streaming." \
+            "$PLIST" || true
+
+          /usr/libexec/PlistBuddy \
+            -c "Add :NSMicrophoneUsageDescription string VTuLog LIVE uses the microphone for live streaming." \
+            "$PLIST" || true
+
+      - name: Build unsigned iOS app
+        run: |
+          xcodebuild \
+            -workspace ios/App/App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/App.app Payload/
+          zip -qry VTuLog-LIVE-unsigned.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: VTuLog-LIVE-iOS
+          path: VTuLog-LIVE-unsigned.ipa
+          retention-days: 7
