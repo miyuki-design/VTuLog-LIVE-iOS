@@ -41,6 +41,61 @@ jobs:
       - name: Sync Capacitor
         run: pnpm exec cap sync ios
 
+      - name: Install native simultaneous front/rear camera bridge
+        run: |
+          set -e
+          APP_DIR='ios/App/App'
+          test -f "$APP_DIR/AppDelegate.swift"
+          test -f "$APP_DIR/Base.lproj/Main.storyboard"
+          printf "\n" >> "$APP_DIR/AppDelegate.swift"
+          cat MultiCamPlugin.swift >> "$APP_DIR/AppDelegate.swift"
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import re
+          storyboard = Path('ios/App/App/Base.lproj/Main.storyboard')
+          text = storyboard.read_text()
+          # The root Capacitor view controller must be our subclass so that
+          # capacitorDidLoad() can register the local native plugin.
+          text, count = re.subn(
+              r'customClass="CAPBridgeViewController"(?: customModule="[^"]*")?(?: customModuleProvider="[^"]*")?',
+              'customClass="VTuLogBridgeViewController" customModule="App" customModuleProvider="target"', text)
+          if count != 1:
+              raise SystemExit(f'Expected one Capacitor view controller, found {count}')
+          storyboard.write_text(text)
+          PYCODE
+
+      # Register the local Swift plugin through Capacitor's native class list as
+      # well as the custom bridge view controller. This avoids relying only on
+      # storyboard subclass loading when creating the iOS project in CI.
+      - name: Register MultiCam in Capacitor native plugin list
+        run: |
+          set -e
+          python3 - <<'PYCODE'
+          import json
+          from pathlib import Path
+
+          config_file = Path('ios/App/App/capacitor.config.json')
+          if not config_file.is_file():
+              raise SystemExit(f'Missing native Capacitor configuration: {config_file}')
+          config = json.loads(config_file.read_text(encoding='utf-8'))
+          plugins = config.get('packageClassList', [])
+          if not isinstance(plugins, list):
+              raise SystemExit('Invalid packageClassList in capacitor.config.json')
+
+          # Swift declares @objc(MultiCamPlugin); use its Objective-C runtime name.
+          if 'MultiCamPlugin' not in plugins:
+              plugins.append('MultiCamPlugin')
+          config['packageClassList'] = plugins
+          config_file.write_text(json.dumps(config, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+          print('Native plugin classes:', ', '.join(plugins))
+
+          storyboard_file = Path('ios/App/App/Base.lproj/Main.storyboard')
+          storyboard = storyboard_file.read_text(encoding='utf-8')
+          if 'customClass="VTuLogBridgeViewController"' not in storyboard:
+              raise SystemExit('Custom bridge view controller was not installed in Main.storyboard')
+          print('Custom view controller: VTuLogBridgeViewController')
+          PYCODE
+
       - name: Configure camera, microphone and OAuth callback
         run: |
           PLIST="ios/App/App/Info.plist"
