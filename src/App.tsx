@@ -3,6 +3,7 @@ import { Capacitor, CapacitorHttp } from '@capacitor/core'
 import { App as CapacitorApp } from '@capacitor/app'
 import { Browser } from '@capacitor/browser'
 import { useLive2D, LIVE2D_CANVAS_SIZE, type Live2DDiagnostics, type NormalizedFileInfo } from './useLive2D'
+import { FaceTracking } from './FaceTracking'
 
 type AppState = 'idle' | 'live'
 
@@ -470,6 +471,9 @@ export default function App() {
   // ── Camera ──
   const hiddenVideoRef = useRef<HTMLVideoElement>(null)
   const cameraStreamRef = useRef<MediaStream | null>(null)
+  const nativeRearModeRef = useRef(false)
+  const nativeRearImageRef = useRef<HTMLImageElement | null>(null)
+  const rearFrameBusyRef = useRef(false)
   const [cameraReady, setCameraReady] = useState(false)
   const [cameraError, setCameraError] = useState<string | null>(null)
 
@@ -1248,6 +1252,58 @@ const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
     return () => localStream?.getTracks().forEach(t => t.stop())
   }, [])
 
+  // Switch BOTH cameras into the native iOS MultiCam session when tracking starts.
+  const restoreRearCamera = useCallback(async () => {
+    const existingTrack = cameraStreamRef.current?.getVideoTracks()[0]
+    if (existingTrack?.readyState === 'live' && !existingTrack.muted) return
+    setCameraReady(false)
+    const s = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 30, max: 30 } },
+      audio: false,
+    })
+    cameraStreamRef.current = s
+    const video = hiddenVideoRef.current
+    if (video) {
+      video.srcObject = s
+      await video.play()
+    }
+    setCameraReady(true)
+  }, [])
+
+  const beginNativeCameras = useCallback(async () => {
+    nativeRearModeRef.current = true
+    setCameraReady(false)
+    cameraStreamRef.current?.getTracks().forEach(track => track.stop())
+    cameraStreamRef.current = null
+    if (hiddenVideoRef.current) {
+      hiddenVideoRef.current.pause()
+      hiddenVideoRef.current.srcObject = null
+    }
+    nativeRearImageRef.current = null
+  }, [])
+
+  const receiveNativeRearFrame = useCallback((jpeg: string) => {
+    if (!nativeRearModeRef.current || rearFrameBusyRef.current) return
+    rearFrameBusyRef.current = true
+    const image = new Image()
+    image.onload = () => {
+      if (nativeRearModeRef.current) {
+        nativeRearImageRef.current = image
+        setCameraReady(true)
+      }
+      rearFrameBusyRef.current = false
+    }
+    image.onerror = () => { rearFrameBusyRef.current = false }
+    image.src = `data:image/jpeg;base64,${jpeg}`
+  }, [])
+
+  const endNativeCameras = useCallback(async () => {
+    nativeRearModeRef.current = false
+    nativeRearImageRef.current = null
+    rearFrameBusyRef.current = false
+    await restoreRearCamera()
+  }, [restoreRearCamera])
+
   // ── Load avatar image ──
   useEffect(() => {
     if (!customAvatarUrl) { avatarImgRef.current = null; return }
@@ -1375,7 +1431,13 @@ const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
         } else {
           ctx.drawImage(privacyStandbyCanvas, 0, 0)
         }
-      } else if (video && video.readyState >= 2 && video.videoWidth > 0) {
+      } else if (nativeRearModeRef.current && nativeRearImageRef.current) {
+        // LIVE output is always the same canvas, so existing WebRTC/WHIP stays untouched.
+        const image = nativeRearImageRef.current
+        const vw = image.naturalWidth, vh = image.naturalHeight
+        const r = Math.max(CW / vw, CH / vh)
+        ctx.drawImage(image, (CW - vw * r) / 2, (CH - vh * r) / 2, vw * r, vh * r)
+      } else if (!nativeRearModeRef.current && video && video.readyState >= 2 && video.videoWidth > 0) {
         const vw = video.videoWidth, vh = video.videoHeight
         const r = Math.max(CW / vw, CH / vh)
         const dw = vw * r, dh = vh * r
@@ -3113,6 +3175,18 @@ useEffect(() => {
           
         </div>
         
+        {/* Face tracking never displays the front camera or broadcasts selfie frames. */}
+        {rtcRole !== 'receiver' && isLive2DActive && (
+          <div className="px-5 pb-2 shrink-0 z-10">
+            <FaceTracking pixiAppRef={live2d.pixiAppRef}
+              rearStreamRef={cameraStreamRef}
+              onRearCameraInterrupted={restoreRearCamera}
+              onBeginNativeCameras={beginNativeCameras}
+              onNativeRearFrame={receiveNativeRearFrame}
+              onEndNativeCameras={endNativeCameras} />
+          </div>
+        )}
+
        {/* viewfinder */}
       <div
         className="relative mx-auto rounded-2xl overflow-hidden shrink-0"
