@@ -208,19 +208,21 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
     }
   }, [])
 
+  // DIAGNOSTIC ONLY: This intentionally never opens front camera, stops the rear
+  // camera, or starts MultiCam. If the display stays visible, isolate next step.
   const start = async () => {
-    debugRef.current = emptyDebug()
+    if (state === 'starting') return
     setState('starting')
-    setMessage('① MediaPipe WASMを読み込み中…')
+    setMessage('診断 1/2：MediaPipe WASM を読み込み中…')
     const generation = ++generationRef.current
-    let attemptedFrontCamera = false
+    let landmarker: FaceLandmarker | null = null
     try {
       const vision = await FilesetResolver.forVisionTasks(
         'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm'
       )
       if (generation !== generationRef.current) return
-      setMessage('② 顔認識モデルを読み込み中…')
-      const landmarker = await FaceLandmarker.createFromOptions(vision, {
+      setMessage('診断 2/2：顔認識モデルを読み込み中…')
+      landmarker = await FaceLandmarker.createFromOptions(vision, {
         baseOptions: {
           modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
           delegate: 'CPU',
@@ -229,189 +231,23 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
         numFaces: 1,
         outputFaceBlendshapes: true,
       })
-      if (generation !== generationRef.current) { landmarker.close(); return }
-      landmarkerRef.current = landmarker
-
-      if (Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'ios') {
-        // iOS WKWebView cannot reliably own the rear camera while opening the front.
-        // Hand both cameras to ONE native AVCaptureMultiCamSession instead.
-        const canvas = document.createElement('canvas')
-        canvas.width = 240
-        canvas.height = 320
-        frontCanvasRef.current = canvas
-        const ctx = canvas.getContext('2d')!
-        frontFrameReadyRef.current = false
-        // Detect directly from the canvas. Do NOT await video.play() here:
-        // a canvas-backed MediaStream may never play until the first frame,
-        // but native cameras cannot start until after that await (deadlock).
-        setMessage('③ ネイティブカメラを接続中…')
-        const handle = await MultiCam.addListener('frame', ({ camera, jpeg }) => {
-          if (generation !== generationRef.current) return
-          if (camera === 'rear') {
-            debugRef.current.rearReceived++
-            onNativeRearFrame(jpeg)
-            return
-          }
-          debugRef.current.frontReceived++
-          if (frontDecodingRef.current) return
-          frontDecodingRef.current = true
-          const img = new Image()
-          img.onload = () => {
-            if (generation === generationRef.current) {
-              // Native front JPEG is landscape (e.g. 320x180). Rotate it to portrait
-              // BEFORE analysis; keep aspect ratio (no 320x180 -> 240x320 stretching).
-              ctx.save()
-              ctx.setTransform(1, 0, 0, 1, 0, 0)
-              ctx.fillStyle = '#000'
-              ctx.fillRect(0, 0, canvas.width, canvas.height)
-              const sourceW = img.naturalWidth
-              const sourceH = img.naturalHeight
-              // After rotation the source dimensions are sourceH x sourceW.
-              const scale = Math.min(canvas.width / sourceH, canvas.height / sourceW)
-              const w = sourceW * scale
-              const h = sourceH * scale
-              if (frontRotationRef.current === 'clockwise') {
-                ctx.translate(canvas.width / 2, canvas.height / 2)
-                ctx.rotate(Math.PI / 2)
-              } else {
-                ctx.translate(canvas.width / 2, canvas.height / 2)
-                ctx.rotate(-Math.PI / 2)
-              }
-              ctx.drawImage(img, -w / 2, -h / 2, w, h)
-              ctx.restore()
-              debugRef.current.frontFrameSize = `${img.naturalWidth}×${img.naturalHeight}`
-              frontFrameReadyRef.current = true
-              debugRef.current.frontDecoded++
-            }
-            frontDecodingRef.current = false
-          }
-          img.onerror = () => { frontDecodingRef.current = false }
-          img.src = `data:image/jpeg;base64,${jpeg}`
-        })
-        listenerRef.current = handle
-        if (generation !== generationRef.current) return
-        setMessage('④ 背面カメラを切り替え中…')
-        await onBeginNativeCameras()
-        nativeRef.current = true
-        setMessage('⑤ 前後カメラを起動中…')
-        try { await MultiCam.start() } catch (error) {
-          stop()
-          throw error
-        }
-        if (generation !== generationRef.current) return
-        runningRef.current = true
-        setState('on')
-        setMessage('前後カメラ起動済み。顔の映像を待っています…')
-        const loop = () => {
-          if (generation !== generationRef.current || !runningRef.current) return
-          const now = performance.now()
-          if (frontFrameReadyRef.current && now - lastAnalyzedRef.current >= 65) {
-            lastAnalyzedRef.current = now
-            try {
-              debugRef.current.analyzed++
-              const categories = landmarker.detectForVideo(canvas, now).faceBlendshapes?.[0]?.categories
-              if (categories) {
-                debugRef.current.detected++
-                debugRef.current.lastFaceAt = Date.now()
-                debugRef.current.jawOpen = score(categories, 'jawOpen')
-                debugRef.current.jawMax = Math.max(debugRef.current.jawMax, debugRef.current.jawOpen)
-                debugRef.current.smileRaw = (score(categories, 'mouthSmileLeft') + score(categories, 'mouthSmileRight')) / 2
-                debugRef.current.eyeBlinkL = score(categories, 'eyeBlinkLeft')
-                debugRef.current.mouthFunnel = score(categories, 'mouthFunnel')
-                debugRef.current.blendshapeCount = categories.length
-                setMessage(prev => prev.startsWith('表情追跡中') ? prev : '表情追跡中（顔の映像は表示・保存しません）')
-                scoresRef.current = {
-                  mouth: Math.min(1, score(categories, 'jawOpen') * 1.5),
-                  smile: Math.min(1, score(categories, 'mouthSmileLeft') + score(categories, 'mouthSmileRight')),
-                  leftEye: 1 - score(categories, 'eyeBlinkLeft'),
-                  rightEye: 1 - score(categories, 'eyeBlinkRight'),
-                }
-                debugRef.current.mouthTarget = scoresRef.current.mouth
-              }
-            } catch (error) {
-              debugRef.current.error = error instanceof Error ? error.message : String(error)
-              console.warn('Native tracking frame:', error)
-            }
-          }
-          frameRef.current = requestAnimationFrame(loop)
-        }
-        frameRef.current = requestAnimationFrame(loop)
-        return
-      }
-
-      const rearTrack = rearStreamRef.current?.getVideoTracks()[0]
-      if (!rearTrack || rearTrack.readyState !== 'live') throw new Error('背面カメラの起動後に試してください')
-      attemptedFrontCamera = true
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { exact: 'user' }, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 15 } },
-        audio: false,
-      })
-      if (generation !== generationRef.current) { stream.getTracks().forEach(t => t.stop()); return }
-      streamRef.current = stream
-      if (rearTrack.readyState !== 'live' || rearTrack.muted) {
-        await restoreRear()
-        return
-      }
-
-      const video = document.createElement('video')
-      video.muted = true
-      video.autoplay = true
-      video.playsInline = true
-      video.srcObject = stream
-      videoRef.current = video
-      await video.play()
       if (generation !== generationRef.current) return
-      if (rearTrack.readyState !== 'live' || rearTrack.muted) {
-        await restoreRear()
-        return
-      }
-      runningRef.current = true
-      setState('on')
-      setMessage('表情追跡中（顔の映像は表示・保存しません）')
-
-      const loop = () => {
-        if (!runningRef.current || generation !== generationRef.current) return
-        const now = performance.now()
-        if (rearTrack.readyState !== 'live' || rearTrack.muted) {
-          void restoreRear()
-          return
-        }
-        if (video.readyState >= 2 && now - lastAnalyzedRef.current >= 80) {
-          lastAnalyzedRef.current = now
-          try {
-            const result = landmarker.detectForVideo(video, now)
-            const categories = result.faceBlendshapes?.[0]?.categories
-            if (categories) {
-              scoresRef.current = {
-                mouth: Math.max(0, Math.min(1, score(categories, 'jawOpen') * 1.5)),
-                smile: Math.max(-1, Math.min(1, (score(categories, 'mouthSmileLeft') + score(categories, 'mouthSmileRight')))),
-                leftEye: 1 - score(categories, 'eyeBlinkLeft'),
-                rightEye: 1 - score(categories, 'eyeBlinkRight'),
-              }
-            }
-          } catch (error) { console.warn('Face tracking frame:', error) }
-        }
-        frameRef.current = requestAnimationFrame(loop)
-      }
-      frameRef.current = requestAnimationFrame(loop)
+      setMessage('✅ MediaPipe初期化成功。前後カメラは切替えていません。画面が正常か確認してください。')
     } catch (error) {
       if (generation !== generationRef.current) return
-      if (attemptedFrontCamera) {
-        // Even getUserMedia rejection may have interrupted the rear camera.
-        await restoreRear()
-      } else {
-        stop()
-      }
-      setMessage(`表情追跡を開始できません: ${error instanceof Error ? error.message : String(error)}`)
+      setMessage(`❌ MediaPipe初期化失敗：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      landmarker?.close()
+      if (generation === generationRef.current) setState('off')
     }
   }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
-      <button type="button" disabled={recoveringRef.current}
-        onClick={state !== 'off' ? () => { stop(); setMessage('表情追跡を停止しました') } : start}
+      <button type="button" disabled={state === 'starting'}
+        onClick={start}
         style={{ padding: '7px 10px', borderRadius: 12, background: '#35214c', color: '#fff', fontSize: 12, border: '1px solid #aa89d6' }}>
-        {state === 'on' ? '表情追跡を停止' : state === 'starting' ? '準備を中止' : '表情追跡を開始'}
+        {state === 'starting' ? '診断中…' : 'MediaPipeだけ診断する'}
       </button>
       {message && <span role="status" style={{ fontSize: 10, color: '#d8c8f2', maxWidth: 280 }}>{message}</span>}
     </div>
