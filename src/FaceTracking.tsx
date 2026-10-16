@@ -29,6 +29,7 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onBeginNativeCameras, 
   const [driving, setDriving] = useState(false)
   const drivingRef = useRef(false)
   const [driveMessage, setDriveMessage] = useState('')
+  const [mouthParamReady, setMouthParamReady] = useState(false)
   const [faceData, setFaceData] = useState({ analyzed: 0, detected: 0, mouth: 0, smile: 0, blinkL: 0, blinkR: 0 })
   const dataRef = useRef({ analyzed: 0, detected: 0, mouth: 0, smile: 0, blinkL: 0, blinkR: 0 })
   const landmarkerRef = useRef<FaceLandmarker | null>(null)
@@ -54,68 +55,96 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onBeginNativeCameras, 
     return () => window.clearInterval(timer)
   }, [])
 
-  // Connect ONLY the parameter application layer to the validated face-analysis path.
-  // Live2D motions/physics are updated after this event, so ticker updates can be overwritten.
-  useEffect(() => {
-    if (!driving || !analyzing || !cameraOn) return
-    const pixi = pixiAppRef.current
-    const model: any = pixi?.stage?.children?.find((child: any) => child?.internalModel?.coreModel)
-    const internal: any = model?.internalModel
-    const core: any = internal?.coreModel
-    if (!internal?.on || !core) {
-      setDriveMessage('❌ Live2Dモデルの内部パラメータを取得できません。')
-      drivingRef.current = false
+  // Step 1: inspect parameters without subscribing to the Live2D update loop.
+  // This is safe to run while camera and MediaPipe are active.
+  const inspectMouthParameter = () => {
+    const model: any = pixiAppRef.current?.stage?.children?.find(
+      (child: any) => child?.internalModel?.coreModel
+    )
+    const core: any = model?.internalModel?.coreModel
+    const raw: any = core?._model?.parameters
+    if (!core || !raw) {
+      setMouthParamReady(false)
+      setDriveMessage('❌ Live2D内部モデルを取得できません。書き込みは行っていません。')
       return
     }
-    const raw: any = core._model?.parameters
-    const count: number = typeof core.getParameterCount === 'function'
-      ? core.getParameterCount() : (raw?.count ?? 0)
-    const params = new Map<string, { index: number; min: number; max: number }>()
+    const count = raw?.count ?? 0
+    let index = -1
     for (let i = 0; i < count; i++) {
-      const v = raw?.ids?.[i] ?? (typeof core.getParameterId === 'function' ? core.getParameterId(i) : null)
-      if (v == null) continue
-      const id = typeof v?.getString === 'function' ? v.getString() : String(v)
-      params.set(id, { index: i, min: raw?.minimumValues?.[i] ?? -1, max: raw?.maximumValues?.[i] ?? 1 })
+      const id = raw?.ids?.[i]
+      const name = typeof id?.getString === 'function' ? id.getString() : String(id)
+      if (name === 'ParamMouthOpenY') { index = i; break }
     }
-    const names = ['ParamMouthOpenY', 'ParamMouthForm', 'ParamEyeLOpen', 'ParamEyeROpen']
-    const found = names.filter(id => params.has(id))
-    setDriveMessage(found.length
-      ? `Live2Dに接続：${found.length}/4パラメータ（${found.join(', ')}）`
-      : '⚠️ 対応するLive2Dパラメータが見つかりません。モデル固有のIDを確認してください。')
-    const smoothed = new Map<string, number>()
-    const drive = (id: string, target: number, alpha: number) => {
-      const param = params.get(id)
-      if (!param) return
-      const previous = smoothed.get(id) ?? (raw?.values?.[param.index] ?? target)
-      const next = Math.max(param.min, Math.min(param.max, previous + (target - previous) * alpha))
-      smoothed.set(id, next)
-      if (typeof core.setParameterValueByIndex === 'function') {
-        core.setParameterValueByIndex(param.index, next)
-      } else if (raw?.values) {
-        raw.values[param.index] = next
+    const writable = typeof core.setParameterValueByIndex === 'function'
+    setMouthParamReady(index >= 0 && writable)
+    setDriveMessage(index < 0
+      ? '⚠️ ParamMouthOpenY が見つかりません。書き込みは行っていません。'
+      : writable
+        ? `✅ 口パラメータ確認OK（index=${index}）。まだ書き込みはしていません。`
+        : '⚠️ パラメータはありますが、書き込みAPIが見つかりません。')
+  }
+
+  // Step 2: write to ONLY the mouth opening parameter when manually enabled.
+  // Keep other expression parameters, camera control and face analysis unchanged.
+  useEffect(() => {
+    if (!driving || !mouthParamReady || !analyzing || !cameraOn) return
+    const model: any = pixiAppRef.current?.stage?.children?.find(
+      (child: any) => child?.internalModel?.coreModel
+    )
+    const internal: any = model?.internalModel
+    const core: any = internal?.coreModel
+    const raw: any = core?._model?.parameters
+    if (!internal?.on || !core || !raw || typeof core.setParameterValueByIndex !== 'function') {
+      setDriveMessage('❌ モデルの接続に失敗しました。')
+      return
+    }
+    const count = raw.count ?? 0
+    let index = -1
+    for (let i = 0; i < count; i++) {
+      const id = raw?.ids?.[i]
+      if ((typeof id?.getString === 'function' ? id.getString() : String(id)) === 'ParamMouthOpenY') {
+        index = i; break
       }
     }
+    if (index < 0) { setDriveMessage('❌ 口のパラメータが見つかりません。'); return }
+    const minimum = raw?.minimumValues?.[index] ?? 0
+    const maximum = raw?.maximumValues?.[index] ?? 1
+    let lastValue = 0
+    let lastWriteAt = 0
+    let failed = false
+    let writes = 0
     const apply = () => {
-      if (!drivingRef.current || !analyzingRef.current || !runningRef.current) return
-      const s = targetRef.current
+      if (!drivingRef.current || !analyzingRef.current || !runningRef.current || failed) return
+      // Slow down parameter writes for diagnosis; do not touch any other parameter.
+      const now = performance.now()
+      if (now - lastWriteAt < 100) return
+      lastWriteAt = now
+      const requested = targetRef.current.mouth
+      if (!Number.isFinite(requested)) return
+      lastValue += (requested - lastValue) * 0.7
+      const next = Math.max(minimum, Math.min(maximum, lastValue))
       try {
-        drive('ParamMouthOpenY', s.mouth, 0.90)
-        drive('ParamMouthForm', s.smile, 0.36)
-        drive('ParamEyeLOpen', s.leftEye, 0.55)
-        drive('ParamEyeROpen', s.rightEye, 0.55)
+        core.setParameterValueByIndex(index, next)
+        writes++
+        // Frequent React setState inside a render callback is deliberately avoided.
       } catch (error) {
-        console.warn('Live2D tracking parameter update:', error)
+        failed = true
+        console.error('口パラメータ書き込み失敗', error)
+        setDriveMessage(`❌ 口パラメータ書き込み失敗（${writes}回後）: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
     internal.on('beforeModelUpdate', apply)
-    return () => { try { internal.off?.('beforeModelUpdate', apply) } catch { /* destroyed */ } }
-  }, [driving, analyzing, cameraOn, pixiAppRef])
+    setDriveMessage('口だけ反映中：笑顔・まぶたのパラメータは書き換えていません。')
+    return () => {
+      try { internal.off?.('beforeModelUpdate', apply) } catch { /* model destroyed */ }
+    }
+  }, [driving, mouthParamReady, analyzing, cameraOn, pixiAppRef])
 
   const stopAnalysis = () => {
     analysisGenerationRef.current++
     analyzingRef.current = false
     drivingRef.current = false
-    if (!disposedRef.current) setDriving(false)
+    if (!disposedRef.current) { setDriving(false); setMouthParamReady(false) }
     targetRef.current = { mouth: 0, smile: 0, leftEye: 1, rightEye: 1 }
     decodingRef.current = false
     const model = landmarkerRef.current
@@ -350,30 +379,33 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onBeginNativeCameras, 
         )}
       </div>
       {analyzing && (
-        <button type="button" style={{ ...buttonStyle, borderColor: '#55ddcb' }}
-          onClick={() => {
-            if (drivingRef.current) {
-              drivingRef.current = false
-              setDriving(false)
-              setDriveMessage('Live2Dへの反映を停止しました。顔の数値解析は継続中です。')
-            } else {
-              drivingRef.current = true
-              setDriveMessage('Live2Dに接続中…')
-              setDriving(true)
-            }
-          }}>
-          {driving ? 'Live2D表情反映を停止' : 'Live2D表情反映テスト'}
-        </button>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          <button type="button" style={{ ...buttonStyle, borderColor: '#55ddcb' }}
+            disabled={driving}
+            onClick={inspectMouthParameter}>
+            ① Live2D口パラメータ確認（書き込みなし）
+          </button>
+          {mouthParamReady && (
+            <button type="button" style={{ ...buttonStyle, borderColor: '#55ddcb' }}
+              onClick={() => {
+                drivingRef.current = !drivingRef.current
+                setDriving(drivingRef.current)
+                setDriveMessage(drivingRef.current ? '口だけ反映の準備中…' : '口だけ反映停止。顔解析は継続中。')
+              }}>
+              {driving ? '② 口だけ反映を停止' : '② 口だけ反映テスト'}
+            </button>
+          )}
+        </div>
       )}
       <span role="status" style={{ fontSize: 10, color: '#d8c8f2', maxWidth: 310, overflowWrap: 'anywhere' }}>{message}</span>
       {driveMessage && <span role="status" style={{ fontSize: 10, color: '#a4f0d3', overflowWrap: 'anywhere' }}>{driveMessage}</span>}
-      {cameraOn && <span style={{ fontSize: 11, color: '#a4f0d3' }}>受信フレーム数：前面 {counts.front} / 背面 {counts.rear}（Live2D反映：{driving ? 'ON' : 'OFF'}）</span>}
+      {cameraOn && <span style={{ fontSize: 11, color: '#a4f0d3' }}>受信フレーム数：前面 {counts.front} / 背面 {counts.rear}（口だけ反映：{driving ? 'ON' : 'OFF'}）</span>}
       {analyzing && (
         <div style={{ fontSize: 11, lineHeight: 1.7, color: '#a4f0d3', overflowWrap: 'anywhere' }}>
           解析 {faceData.analyzed} 回 / 顔検出 {faceData.detected} 回
           <div>口の開き: {(faceData.mouth * 100).toFixed(0)}% / 笑顔: {(faceData.smile * 100).toFixed(0)}%</div>
           <div>左まばたき: {(faceData.blinkL * 100).toFixed(0)}% / 右まばたき: {(faceData.blinkR * 100).toFixed(0)}%</div>
-          <div style={{ color: '#c8b4ea' }}>※ 前面映像は画面表示・保存・送信しません。Live2D反映はテストボタンで個別に切り替えます。</div>
+          <div style={{ color: '#c8b4ea' }}>※ 前面映像は画面表示・保存・送信しません。Live2D反映は口だけを手動でテストします。</div>
         </div>
       )}
     </div>
