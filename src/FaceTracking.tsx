@@ -12,7 +12,7 @@ const MultiCam = registerPlugin<{
 }>('MultiCam')
 
 /** Diagnostic only: front frames are analyzed in memory and never displayed, saved, or transmitted. */
-export function FaceTracking({ rearStreamRef, onBeginNativeCameras, onNativeRearFrame,
+export function FaceTracking({ pixiAppRef, rearStreamRef, onBeginNativeCameras, onNativeRearFrame,
   onEndNativeCameras }: {
   pixiAppRef: MutableRefObject<any>
   rearStreamRef: MutableRefObject<MediaStream | null>
@@ -26,12 +26,16 @@ export function FaceTracking({ rearStreamRef, onBeginNativeCameras, onNativeRear
   const [message, setMessage] = useState('前後カメラは未起動です。')
   const [counts, setCounts] = useState({ front: 0, rear: 0 })
   const [analyzing, setAnalyzing] = useState(false)
+  const [driving, setDriving] = useState(false)
+  const drivingRef = useRef(false)
+  const [driveMessage, setDriveMessage] = useState('')
   const [faceData, setFaceData] = useState({ analyzed: 0, detected: 0, mouth: 0, smile: 0, blinkL: 0, blinkR: 0 })
   const dataRef = useRef({ analyzed: 0, detected: 0, mouth: 0, smile: 0, blinkL: 0, blinkR: 0 })
   const landmarkerRef = useRef<FaceLandmarker | null>(null)
   const analyzingRef = useRef(false)
   const decodingRef = useRef(false)
   const lastFrameAtRef = useRef(0)
+  const targetRef = useRef({ mouth: 0, smile: 0, leftEye: 1, rightEye: 1 })
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const analysisGenerationRef = useRef(0)
   const countsRef = useRef({ front: 0, rear: 0 })
@@ -50,9 +54,69 @@ export function FaceTracking({ rearStreamRef, onBeginNativeCameras, onNativeRear
     return () => window.clearInterval(timer)
   }, [])
 
+  // Connect ONLY the parameter application layer to the validated face-analysis path.
+  // Live2D motions/physics are updated after this event, so ticker updates can be overwritten.
+  useEffect(() => {
+    if (!driving || !analyzing || !cameraOn) return
+    const pixi = pixiAppRef.current
+    const model: any = pixi?.stage?.children?.find((child: any) => child?.internalModel?.coreModel)
+    const internal: any = model?.internalModel
+    const core: any = internal?.coreModel
+    if (!internal?.on || !core) {
+      setDriveMessage('❌ Live2Dモデルの内部パラメータを取得できません。')
+      drivingRef.current = false
+      return
+    }
+    const raw: any = core._model?.parameters
+    const count: number = typeof core.getParameterCount === 'function'
+      ? core.getParameterCount() : (raw?.count ?? 0)
+    const params = new Map<string, { index: number; min: number; max: number }>()
+    for (let i = 0; i < count; i++) {
+      const v = raw?.ids?.[i] ?? (typeof core.getParameterId === 'function' ? core.getParameterId(i) : null)
+      if (v == null) continue
+      const id = typeof v?.getString === 'function' ? v.getString() : String(v)
+      params.set(id, { index: i, min: raw?.minimumValues?.[i] ?? -1, max: raw?.maximumValues?.[i] ?? 1 })
+    }
+    const names = ['ParamMouthOpenY', 'ParamMouthForm', 'ParamEyeLOpen', 'ParamEyeROpen']
+    const found = names.filter(id => params.has(id))
+    setDriveMessage(found.length
+      ? `Live2Dに接続：${found.length}/4パラメータ（${found.join(', ')}）`
+      : '⚠️ 対応するLive2Dパラメータが見つかりません。モデル固有のIDを確認してください。')
+    const smoothed = new Map<string, number>()
+    const drive = (id: string, target: number, alpha: number) => {
+      const param = params.get(id)
+      if (!param) return
+      const previous = smoothed.get(id) ?? (raw?.values?.[param.index] ?? target)
+      const next = Math.max(param.min, Math.min(param.max, previous + (target - previous) * alpha))
+      smoothed.set(id, next)
+      if (typeof core.setParameterValueByIndex === 'function') {
+        core.setParameterValueByIndex(param.index, next)
+      } else if (raw?.values) {
+        raw.values[param.index] = next
+      }
+    }
+    const apply = () => {
+      if (!drivingRef.current || !analyzingRef.current || !runningRef.current) return
+      const s = targetRef.current
+      try {
+        drive('ParamMouthOpenY', s.mouth, 0.90)
+        drive('ParamMouthForm', s.smile, 0.36)
+        drive('ParamEyeLOpen', s.leftEye, 0.55)
+        drive('ParamEyeROpen', s.rightEye, 0.55)
+      } catch (error) {
+        console.warn('Live2D tracking parameter update:', error)
+      }
+    }
+    internal.on('beforeModelUpdate', apply)
+    return () => { try { internal.off?.('beforeModelUpdate', apply) } catch { /* destroyed */ } }
+  }, [driving, analyzing, cameraOn, pixiAppRef])
+
   const stopAnalysis = () => {
     analysisGenerationRef.current++
     analyzingRef.current = false
+    drivingRef.current = false
+    if (!disposedRef.current) setDriving(false)
+    targetRef.current = { mouth: 0, smile: 0, leftEye: 1, rightEye: 1 }
     decodingRef.current = false
     const model = landmarkerRef.current
     landmarkerRef.current = null
@@ -97,6 +161,12 @@ export function FaceTracking({ rearStreamRef, onBeginNativeCameras, onNativeRear
           d.smile = (score('mouthSmileLeft') + score('mouthSmileRight')) / 2
           d.blinkL = score('eyeBlinkLeft')
           d.blinkR = score('eyeBlinkRight')
+          targetRef.current = {
+            mouth: Math.min(1, Math.max(0, d.mouth * 1.5)),
+            smile: Math.min(1, Math.max(-1, d.smile * 2)),
+            leftEye: 1 - d.blinkL,
+            rightEye: 1 - d.blinkR,
+          }
         }
       } catch (error) {
         if (!disposedRef.current) setMessage(`⚠️ 顔解析エラー：${error instanceof Error ? error.message : String(error)}`)
@@ -279,14 +349,31 @@ export function FaceTracking({ rearStreamRef, onBeginNativeCameras, onNativeRear
           </button>
         )}
       </div>
+      {analyzing && (
+        <button type="button" style={{ ...buttonStyle, borderColor: '#55ddcb' }}
+          onClick={() => {
+            if (drivingRef.current) {
+              drivingRef.current = false
+              setDriving(false)
+              setDriveMessage('Live2Dへの反映を停止しました。顔の数値解析は継続中です。')
+            } else {
+              drivingRef.current = true
+              setDriveMessage('Live2Dに接続中…')
+              setDriving(true)
+            }
+          }}>
+          {driving ? 'Live2D表情反映を停止' : 'Live2D表情反映テスト'}
+        </button>
+      )}
       <span role="status" style={{ fontSize: 10, color: '#d8c8f2', maxWidth: 310, overflowWrap: 'anywhere' }}>{message}</span>
-      {cameraOn && <span style={{ fontSize: 11, color: '#a4f0d3' }}>受信フレーム数：前面 {counts.front} / 背面 {counts.rear}（Live2Dへの表情反映なし）</span>}
+      {driveMessage && <span role="status" style={{ fontSize: 10, color: '#a4f0d3', overflowWrap: 'anywhere' }}>{driveMessage}</span>}
+      {cameraOn && <span style={{ fontSize: 11, color: '#a4f0d3' }}>受信フレーム数：前面 {counts.front} / 背面 {counts.rear}（Live2D反映：{driving ? 'ON' : 'OFF'}）</span>}
       {analyzing && (
         <div style={{ fontSize: 11, lineHeight: 1.7, color: '#a4f0d3', overflowWrap: 'anywhere' }}>
           解析 {faceData.analyzed} 回 / 顔検出 {faceData.detected} 回
           <div>口の開き: {(faceData.mouth * 100).toFixed(0)}% / 笑顔: {(faceData.smile * 100).toFixed(0)}%</div>
           <div>左まばたき: {(faceData.blinkL * 100).toFixed(0)}% / 右まばたき: {(faceData.blinkR * 100).toFixed(0)}%</div>
-          <div style={{ color: '#c8b4ea' }}>※ 前面映像は画面表示・保存・送信しません。Live2Dへの反映もありません。</div>
+          <div style={{ color: '#c8b4ea' }}>※ 前面映像は画面表示・保存・送信しません。Live2D反映はテストボタンで個別に切り替えます。</div>
         </div>
       )}
     </div>
