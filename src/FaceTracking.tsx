@@ -11,423 +11,418 @@ const MultiCam = registerPlugin<{
   addListener(event: 'frame', cb: (data: FrameEvent) => void): Promise<PluginListenerHandle>
 }>('MultiCam')
 
-/** Diagnostic only: front frames are analyzed in memory and never displayed, saved, or transmitted. */
-export function FaceTracking({ pixiAppRef, rearStreamRef, onBeginNativeCameras, onNativeRearFrame,
-  onEndNativeCameras }: {
-  pixiAppRef: MutableRefObject<any>
+type PixiRef = MutableRefObject<any>
+type Scores = { mouth: number; smile: number; leftEye: number; rightEye: number }
+const DEFAULT: Scores = { mouth: 0, smile: 0, leftEye: 1, rightEye: 1 }
+
+function score(categories: { categoryName: string; score: number }[], key: string) {
+  return categories.find(item => item.categoryName === key)?.score ?? 0
+}
+
+
+// Debug information is local to the UI. No face frames are displayed, uploaded, or saved.
+type TrackingDebug = {
+  frontReceived: number
+  rearReceived: number
+  frontDecoded: number
+  analyzed: number
+  detected: number
+  lastFaceAt: number
+  jawOpen: number
+  jawMax: number
+  smileRaw: number
+  eyeBlinkL: number
+  mouthFunnel: number
+  blendshapeCount: number
+  frontFrameSize: string
+  blendshapeTop: string
+  framesChanged: number
+  lastFrameSignature: string
+  mouthTarget: number
+  live2D: string
+  parameters: string
+  modelUpdates: number
+  writes: number
+  error: string
+}
+const emptyDebug = (): TrackingDebug => ({
+  frontReceived: 0, rearReceived: 0, frontDecoded: 0,
+  analyzed: 0, detected: 0, lastFaceAt: 0, jawOpen: 0, jawMax: 0, smileRaw: 0,
+  eyeBlinkL: 0, mouthFunnel: 0, blendshapeCount: 0, frontFrameSize: '未受信',
+  blendshapeTop: '-', framesChanged: 0, lastFrameSignature: '', mouthTarget: 0,
+  live2D: '未確認', parameters: '未確認', modelUpdates: 0, writes: 0, error: '',
+})
+
+/** Front camera frames are analyzed privately; selfie images are not shown or recorded. */
+export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupted,
+  onBeginNativeCameras, onNativeRearFrame, onNativeCamerasStopping, onEndNativeCameras, rearCameraReady }: {
+  pixiAppRef: PixiRef
+  rearCameraReady: boolean
   rearStreamRef: MutableRefObject<MediaStream | null>
   onRearCameraInterrupted: () => Promise<void>
   onBeginNativeCameras: () => Promise<void>
   onNativeRearFrame: (jpeg: string) => void
+  onNativeCamerasStopping: () => void
   onEndNativeCameras: () => Promise<void>
 }) {
-  const [busy, setBusy] = useState(false)
-  const [cameraOn, setCameraOn] = useState(false)
-  const [message, setMessage] = useState('前後カメラは未起動です。')
-  const [counts, setCounts] = useState({ front: 0, rear: 0 })
-  const [analyzing, setAnalyzing] = useState(false)
-  const [driving, setDriving] = useState(false)
-  const drivingRef = useRef(false)
-  const [driveMessage, setDriveMessage] = useState('')
-  const [mouthParamReady, setMouthParamReady] = useState(false)
-  const [faceData, setFaceData] = useState({ analyzed: 0, detected: 0, mouth: 0, smile: 0, blinkL: 0, blinkR: 0 })
-  const dataRef = useRef({ analyzed: 0, detected: 0, mouth: 0, smile: 0, blinkL: 0, blinkR: 0 })
+  const [state, setState] = useState<'off' | 'starting' | 'on'>('off')
+  const autoStartRequestedRef = useRef(false)
+  const [message, setMessage] = useState('')
+  // iPhone 17 native JPEG orientation: counterclockwise is upright.
+  const frontRotationRef = useRef<'clockwise' | 'counterclockwise'>('counterclockwise')
+  const scoresRef = useRef<Scores>({ ...DEFAULT })
+  const streamRef = useRef<MediaStream | null>(null)
+  const videoRef = useRef<HTMLVideoElement | null>(null)
   const landmarkerRef = useRef<FaceLandmarker | null>(null)
-  const analyzingRef = useRef(false)
-  const decodingRef = useRef(false)
-  const lastFrameAtRef = useRef(0)
-  const targetRef = useRef({ mouth: 0, smile: 0, leftEye: 1, rightEye: 1 })
-  const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const analysisGenerationRef = useRef(0)
-  const countsRef = useRef({ front: 0, rear: 0 })
-  const listenerRef = useRef<PluginListenerHandle | null>(null)
-  const nativeRef = useRef(false)
-  const disposedRef = useRef(false)
-  const runningRef = useRef(false)
+  const frameRef = useRef<number | null>(null)
+  const lastAnalyzedRef = useRef(0)
   const generationRef = useRef(0)
-  const busyRef = useRef(false)
+  const runningRef = useRef(false)
+  const recoveringRef = useRef(false)
+  const nativeRef = useRef(false)
+  const listenerRef = useRef<PluginListenerHandle | null>(null)
+  const frontCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const frontDecodingRef = useRef(false)
+  const frontFrameReadyRef = useRef(false)
+  const debugRef = useRef<TrackingDebug>(emptyDebug())
 
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setCounts({ ...countsRef.current })
-      setFaceData({ ...dataRef.current })
-    }, 500)
-    return () => window.clearInterval(timer)
-  }, [])
-
-  // Step 1: inspect parameters without subscribing to the Live2D update loop.
-  // This is safe to run while camera and MediaPipe are active.
-  const inspectMouthParameter = () => {
-    // Show visible feedback BEFORE touching any Live2D internals.
-    setMouthParamReady(false)
-    setDriveMessage('🔎 Live2D口パラメータを確認しています…（書き込みなし）')
-    try {
-      const app: any = pixiAppRef.current
-      if (!app?.stage) {
-        setDriveMessage('❌ Pixiのstageがありません。モデルを再読み込みしてください。')
-        return
-      }
-      const children = app.stage.children ?? []
-      const model: any = children.find((child: any) => child?.internalModel?.coreModel)
-      if (!model) {
-        setDriveMessage(`❌ Live2Dの内部モデルがありません（stageの要素数: ${children.length}）。`)
-        return
-      }
-      const core: any = model.internalModel.coreModel
-      const raw: any = core?._model?.parameters
-      if (!core || !raw) {
-        setDriveMessage('❌ Live2Dのパラメータ配列を取得できません。')
-        return
-      }
-      const count = Number(raw.count ?? core.getParameterCount?.() ?? 0)
-      if (!Number.isFinite(count) || count < 1 || count > 10000) {
-        setDriveMessage(`❌ パラメータ数が不正です（${count}）。`)
-        return
-      }
-      let index = -1
-      // Some Cubism bindings expose ids as strings or handle objects.
-      for (let i = 0; i < count; i++) {
-        const id = raw.ids?.[i] ?? core.getParameterId?.(i)
-        const name = typeof id?.getString === 'function' ? id.getString() : String(id ?? '')
-        if (name === 'ParamMouthOpenY') { index = i; break }
-      }
-      const writable = typeof core.setParameterValueByIndex === 'function'
-      setMouthParamReady(index >= 0 && writable)
-      setDriveMessage(index < 0
-        ? `⚠️ ParamMouthOpenYが見つかりません（総数: ${count}）。書き込みはしていません。`
-        : writable
-          ? `✅ 口パラメータ確認OK（index=${index} / 総数=${count}）。書き込みなし。`
-          : '⚠️ 口パラメータはありますが、書き込みAPIがありません。')
-    } catch (error) {
-      setMouthParamReady(false)
-      setDriveMessage(`❌ 読み取り中にエラー: ${error instanceof Error ? error.message : String(error)}`)
+  const stop = () => {
+    generationRef.current++
+    runningRef.current = false
+    if (frameRef.current !== null) cancelAnimationFrame(frameRef.current)
+    frameRef.current = null
+    streamRef.current?.getTracks().forEach(track => track.stop())
+    streamRef.current = null
+    if (videoRef.current) {
+      videoRef.current.pause()
+      videoRef.current.srcObject = null
+      videoRef.current = null
+    }
+    landmarkerRef.current?.close()
+    landmarkerRef.current = null
+    scoresRef.current = { ...DEFAULT }
+    frontFrameReadyRef.current = false
+    frontCanvasRef.current = null
+    frontDecodingRef.current = false
+    setState('off')
+    // Remove the native event listener even when startup failed halfway.
+    void listenerRef.current?.remove()
+    listenerRef.current = null
+    if (nativeRef.current) {
+      nativeRef.current = false
+      onNativeCamerasStopping()
+      void MultiCam.stop().catch(error => console.warn('MultiCam stop failed', error)).finally(() => { void onEndNativeCameras() })
     }
   }
 
-  // Step 2: write to ONLY the mouth opening parameter when manually enabled.
-  // Keep other expression parameters, camera control and face analysis unchanged.
+  // Restore the rear viewfinder after the front camera has displaced it.
+  const restoreRear = async () => {
+    if (recoveringRef.current) return
+    recoveringRef.current = true
+    stop() // Release front camera BEFORE trying to reopen rear camera.
+    setMessage('背面カメラを復旧中…')
+    try {
+      await onRearCameraInterrupted()
+      setMessage('前後カメラの同時利用に失敗しました。背面カメラを復旧しました。')
+    } catch (error) {
+      setMessage(`背面カメラの復旧に失敗しました: ${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      recoveringRef.current = false
+    }
+  }
+
+  // FaceTrack prototype uses beforeModelUpdate, not a Pixi ticker callback.
+  // The latter may run BEFORE the model's motions update and get overwritten.
   useEffect(() => {
-    if (!driving || !mouthParamReady || !analyzing || !cameraOn) return
-    const model: any = pixiAppRef.current?.stage?.children?.find(
-      (child: any) => child?.internalModel?.coreModel
-    )
+    if (state !== 'on') return
+    const app = pixiAppRef.current
+    const model: any = app?.stage?.children?.find((child: any) => child?.internalModel?.coreModel)
     const internal: any = model?.internalModel
     const core: any = internal?.coreModel
-    const raw: any = core?._model?.parameters
-    if (!internal?.on || !core || !raw || typeof core.setParameterValueByIndex !== 'function') {
-      setDriveMessage('❌ モデルの接続に失敗しました。')
+    if (!internal?.on || !core) {
+      debugRef.current.live2D = 'モデルが見つかりません'
       return
     }
-    const count = raw.count ?? 0
-    let index = -1
+    debugRef.current.live2D = 'モデル接続OK'
+
+    // Find the real Cubism parameter indices, as in VTuLog-FaceTrack.
+    const raw: any = core._model?.parameters
+    const count: number = typeof core.getParameterCount === 'function'
+      ? core.getParameterCount() : (raw?.count ?? 0)
+    const params = new Map<string, { index: number; min: number; max: number }>()
     for (let i = 0; i < count; i++) {
-      const id = raw?.ids?.[i]
-      if ((typeof id?.getString === 'function' ? id.getString() : String(id)) === 'ParamMouthOpenY') {
-        index = i; break
-      }
+      const rawId = raw?.ids?.[i] ?? (typeof core.getParameterId === 'function' ? core.getParameterId(i) : null)
+      if (rawId == null) continue
+      const id = typeof rawId?.getString === 'function' ? rawId.getString() : String(rawId)
+      params.set(id, {
+        index: i,
+        min: raw?.minimumValues?.[i] ?? -1,
+        max: raw?.maximumValues?.[i] ?? 1,
+      })
     }
-    if (index < 0) { setDriveMessage('❌ 口のパラメータが見つかりません。'); return }
-    const minimum = raw?.minimumValues?.[index] ?? 0
-    const maximum = raw?.maximumValues?.[index] ?? 1
-    let lastValue = 0
-    let lastWriteAt = 0
-    let failed = false
-    let writes = 0
+    const keys = ['ParamMouthOpenY', 'ParamMouthForm', 'ParamEyeLOpen', 'ParamEyeROpen']
+    debugRef.current.parameters = keys.map((k, i) =>
+      `${['口開','口形','左目','右目'][i]}:${params.has(k) ? '有' : '無'}`
+    ).join(' / ')
+    const smoothed = new Map<string, number>()
+    const drive = (id: string, target: number, alpha: number) => {
+      const param = params.get(id)
+      if (!param) return
+      const previous = smoothed.get(id) ?? (raw?.values?.[param.index] ?? target)
+      const value = Math.max(param.min, Math.min(param.max, previous + (target - previous) * alpha))
+      smoothed.set(id, value)
+      if (typeof core.setParameterValueByIndex === 'function') {
+        core.setParameterValueByIndex(param.index, value)
+      } else if (raw?.values) {
+        raw.values[param.index] = value
+      } else {
+        debugRef.current.error = 'Live2Dパラメータの書き込みAPIがありません'
+        return
+      }
+      debugRef.current.writes++
+    }
     const apply = () => {
-      if (!drivingRef.current || !analyzingRef.current || !runningRef.current || failed) return
-      // Slow down parameter writes for diagnosis; do not touch any other parameter.
-      const now = performance.now()
-      if (now - lastWriteAt < 100) return
-      lastWriteAt = now
-      const requested = targetRef.current.mouth
-      if (!Number.isFinite(requested)) return
-      lastValue += (requested - lastValue) * 0.7
-      const next = Math.max(minimum, Math.min(maximum, lastValue))
+      if (!runningRef.current) return
+      debugRef.current.modelUpdates++
+      const s = scoresRef.current
       try {
-        core.setParameterValueByIndex(index, next)
-        writes++
-        // Frequent React setState inside a render callback is deliberately avoided.
+        drive('ParamMouthOpenY', s.mouth, 0.90)
+        drive('ParamMouthForm', s.smile, 0.36)
+        drive('ParamEyeLOpen', s.leftEye, 0.55)
+        drive('ParamEyeROpen', s.rightEye, 0.55)
       } catch (error) {
-        failed = true
-        console.error('口パラメータ書き込み失敗', error)
-        setDriveMessage(`❌ 口パラメータ書き込み失敗（${writes}回後）: ${error instanceof Error ? error.message : String(error)}`)
+        debugRef.current.error = error instanceof Error ? error.message : String(error)
       }
     }
     internal.on('beforeModelUpdate', apply)
-    setDriveMessage('口だけ反映中：笑顔・まぶたのパラメータは書き換えていません。')
-    return () => {
-      try { internal.off?.('beforeModelUpdate', apply) } catch { /* model destroyed */ }
-    }
-  }, [driving, mouthParamReady, analyzing, cameraOn, pixiAppRef])
+    return () => { try { internal.off?.('beforeModelUpdate', apply) } catch { /* destroyed */ } }
+  }, [pixiAppRef, state])
 
-  const stopAnalysis = () => {
-    analysisGenerationRef.current++
-    analyzingRef.current = false
-    drivingRef.current = false
-    if (!disposedRef.current) { setDriving(false); setMouthParamReady(false) }
-    targetRef.current = { mouth: 0, smile: 0, leftEye: 1, rightEye: 1 }
-    decodingRef.current = false
-    const model = landmarkerRef.current
-    landmarkerRef.current = null
-    try { model?.close() } catch (error) { console.warn('FaceLandmarker close', error) }
-    canvasRef.current = null
-    if (!disposedRef.current) setAnalyzing(false)
-  }
-
-  const analyzeFrontJpeg = (jpeg: string, cameraGeneration: number) => {
-    if (!analyzingRef.current || decodingRef.current || cameraGeneration !== generationRef.current) return
-    const now = performance.now()
-    if (now - lastFrameAtRef.current < 160) return // ~6fps: reduce load during diagnostic
-    lastFrameAtRef.current = now
-    decodingRef.current = true
-    const analysisGeneration = analysisGenerationRef.current
-    const img = new Image()
-    img.onload = () => {
-      try {
-        if (!analyzingRef.current || analysisGeneration !== analysisGenerationRef.current ||
-            cameraGeneration !== generationRef.current) return
-        const canvas = canvasRef.current
-        const landmarker = landmarkerRef.current
-        if (!canvas || !landmarker) return
-        const ctx = canvas.getContext('2d')
-        if (!ctx) return
-        // Maintain the portrait rotation validated in the original native tracking code.
-        const sw = img.naturalWidth, sh = img.naturalHeight
-        const scale = Math.min(canvas.width / sh, canvas.height / sw)
-        ctx.save()
-        ctx.clearRect(0, 0, canvas.width, canvas.height)
-        ctx.translate(canvas.width / 2, canvas.height / 2)
-        ctx.rotate(-Math.PI / 2)
-        ctx.drawImage(img, -sw * scale / 2, -sh * scale / 2, sw * scale, sh * scale)
-        ctx.restore()
-        const categories = landmarker.detectForVideo(canvas, performance.now()).faceBlendshapes?.[0]?.categories
-        const d = dataRef.current
-        d.analyzed++
-        if (categories) {
-          const score = (key: string) => categories.find(c => c.categoryName === key)?.score ?? 0
-          d.detected++
-          d.mouth = score('jawOpen')
-          d.smile = (score('mouthSmileLeft') + score('mouthSmileRight')) / 2
-          d.blinkL = score('eyeBlinkLeft')
-          d.blinkR = score('eyeBlinkRight')
-          targetRef.current = {
-            mouth: Math.min(1, Math.max(0, d.mouth * 1.5)),
-            smile: Math.min(1, Math.max(-1, d.smile * 2)),
-            leftEye: 1 - d.blinkL,
-            rightEye: 1 - d.blinkR,
-          }
-        }
-      } catch (error) {
-        if (!disposedRef.current) setMessage(`⚠️ 顔解析エラー：${error instanceof Error ? error.message : String(error)}`)
-      } finally { decodingRef.current = false }
-    }
-    img.onerror = () => { decodingRef.current = false }
-    img.src = `data:image/jpeg;base64,${jpeg}`
-  }
-
-  const startAnalysis = async () => {
-    if (!runningRef.current || busyRef.current || analyzingRef.current) return
-    busyRef.current = true
-    setBusy(true)
-    setMessage('MediaPipeを起動し、顔解析を準備中…')
-    const analysisGeneration = ++analysisGenerationRef.current
-    try {
-      const vision = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm')
-      if (disposedRef.current || analysisGeneration !== analysisGenerationRef.current) return
-      const model = await FaceLandmarker.createFromOptions(vision, {
-        baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task', delegate: 'CPU' },
-        runningMode: 'VIDEO', numFaces: 1, outputFaceBlendshapes: true,
-      })
-      if (disposedRef.current || analysisGeneration !== analysisGenerationRef.current) { model.close(); return }
-      landmarkerRef.current = model
-      const canvas = document.createElement('canvas')
-      canvas.width = 240
-      canvas.height = 320
-      canvasRef.current = canvas
-      dataRef.current = { analyzed: 0, detected: 0, mouth: 0, smile: 0, blinkL: 0, blinkR: 0 }
-      lastFrameAtRef.current = 0
-      analyzingRef.current = true
-      setAnalyzing(true)
-      setMessage('✅ 顔解析中。前面カメラに顔を向けて数値の変化を確認してください。')
-    } catch (error) {
-      stopAnalysis()
-      if (!disposedRef.current) setMessage(`❌ 顔解析を開始できません：${error instanceof Error ? error.message : String(error)}`)
-    } finally {
-      busyRef.current = false
-      if (!disposedRef.current) setBusy(false)
-    }
-  }
-
-  const stopCameras = async (restore = true) => {
-    stopAnalysis()
-    const generation = ++generationRef.current
+  useEffect(() => () => {
+    autoStartRequestedRef.current = false
+    generationRef.current++
     runningRef.current = false
-    busyRef.current = true
-    if (!disposedRef.current) { setBusy(true); setMessage('前後カメラを終了しています…') }
-    const listener = listenerRef.current
-    listenerRef.current = null
-    try { await listener?.remove() } catch (e) { console.warn('MultiCam listener cleanup', e) }
-    // Even a partially successful start may have started a capture session.
-    if (nativeRef.current) {
-      try { await MultiCam.stop() } catch (e) { console.warn('MultiCam stop', e) }
-      nativeRef.current = false
-      if (restore) {
-        try {
-          await onEndNativeCameras()
-          if (!disposedRef.current && generation === generationRef.current) setMessage('✅ 前後カメラ停止。背面カメラを復旧しました。')
-        } catch (error) {
-          if (!disposedRef.current && generation === generationRef.current)
-            setMessage(`❌ 背面カメラ復旧失敗：${error instanceof Error ? error.message : String(error)}`)
-        }
-      }
-    }
-    if (!disposedRef.current && generation === generationRef.current) {
-      setCameraOn(false)
-      setBusy(false)
-      busyRef.current = false
-    }
-  }
-
-  useEffect(() => {
-    disposedRef.current = false
-    return () => {
-    disposedRef.current = true
-    stopAnalysis()
-    ++generationRef.current
-    runningRef.current = false
-    const listener = listenerRef.current
-    listenerRef.current = null
-    void listener?.remove()
+    if (frameRef.current !== null) cancelAnimationFrame(frameRef.current)
+    streamRef.current?.getTracks().forEach(track => track.stop())
+    landmarkerRef.current?.close()
+    if (videoRef.current) { videoRef.current.pause(); videoRef.current.srcObject = null }
+    void listenerRef.current?.remove()
     if (nativeRef.current) {
       nativeRef.current = false
-      void MultiCam.stop().catch(console.warn).finally(() => { void onEndNativeCameras() })
-    }
+      onNativeCamerasStopping()
+      void MultiCam.stop().catch(error => console.warn('MultiCam stop failed', error)).finally(() => { void onEndNativeCameras() })
     }
   }, [])
 
-  const diagnoseMediaPipe = async () => {
-    if (busyRef.current || runningRef.current) return
-    busyRef.current = true
-    setBusy(true)
-    setMessage('MediaPipe WASMを読み込み中…')
-    let model: FaceLandmarker | null = null
-    try {
-      const vision = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm')
-      model = await FaceLandmarker.createFromOptions(vision, {
-        baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task', delegate: 'CPU' },
-        runningMode: 'VIDEO', numFaces: 1, outputFaceBlendshapes: true,
-      })
-      if (!disposedRef.current) setMessage('✅ MediaPipe初期化成功。カメラの切替えなし。')
-    } catch (error) {
-      if (!disposedRef.current) setMessage(`❌ MediaPipe診断失敗：${error instanceof Error ? error.message : String(error)}`)
-    } finally {
-      model?.close()
-      busyRef.current = false
-      if (!disposedRef.current) setBusy(false)
-    }
-  }
-
-  const diagnoseCameras = async () => {
-    if (busyRef.current || runningRef.current) return
-    if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== 'ios') {
-      setMessage('⚠️ 前後カメラ同時起動診断はiOSネイティブアプリ専用です。')
-      return
-    }
-    const rear = rearStreamRef.current?.getVideoTracks()[0]
-    if (!rear || rear.readyState !== 'live') {
-      setMessage('⚠️ 背面カメラのREADY表示を待ってから試してください。')
-      return
-    }
-    busyRef.current = true
-    setBusy(true)
-    setMessage('① カメラのイベント受信を準備中…')
+  const start = async () => {
+    debugRef.current = emptyDebug()
+    setState('starting')
+    setMessage('① MediaPipe WASMを読み込み中…')
     const generation = ++generationRef.current
-    countsRef.current = { front: 0, rear: 0 }
-    setCounts({ ...countsRef.current })
+    let attemptedFrontCamera = false
     try {
-      listenerRef.current = await MultiCam.addListener('frame', ({ camera, jpeg }) => {
-        if (!runningRef.current || disposedRef.current || generation !== generationRef.current) return
-        if (camera === 'front') {
-          countsRef.current.front++
-          if (analyzingRef.current) analyzeFrontJpeg(jpeg, generation)
-        } else if (camera === 'rear') {
-          countsRef.current.rear++
-          onNativeRearFrame(jpeg)
-        }
+      const vision = await FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm'
+      )
+      if (generation !== generationRef.current) return
+      setMessage('② 顔認識モデルを読み込み中…')
+      const landmarker = await FaceLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+          delegate: 'CPU',
+        },
+        runningMode: 'VIDEO',
+        numFaces: 1,
+        outputFaceBlendshapes: true,
       })
-      if (disposedRef.current || generation !== generationRef.current) return
-      setMessage('② WebViewの背面カメラを解放中…')
-      nativeRef.current = true // Mark before switching so partial failures restore the rear camera.
-      await onBeginNativeCameras()
-      if (disposedRef.current || generation !== generationRef.current) return
-      setMessage('③ ネイティブ前後カメラを起動中…')
+      if (generation !== generationRef.current) { landmarker.close(); return }
+      landmarkerRef.current = landmarker
+
+      if (Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'ios') {
+        // iOS WKWebView cannot reliably own the rear camera while opening the front.
+        // Hand both cameras to ONE native AVCaptureMultiCamSession instead.
+        const canvas = document.createElement('canvas')
+        canvas.width = 240
+        canvas.height = 320
+        frontCanvasRef.current = canvas
+        const ctx = canvas.getContext('2d')!
+        frontFrameReadyRef.current = false
+        // Detect directly from the canvas. Do NOT await video.play() here:
+        // a canvas-backed MediaStream may never play until the first frame,
+        // but native cameras cannot start until after that await (deadlock).
+        setMessage('③ ネイティブカメラを接続中…')
+        const handle = await MultiCam.addListener('frame', ({ camera, jpeg }) => {
+          if (generation !== generationRef.current) return
+          if (camera === 'rear') {
+            debugRef.current.rearReceived++
+            onNativeRearFrame(jpeg)
+            return
+          }
+          debugRef.current.frontReceived++
+          if (frontDecodingRef.current) return
+          frontDecodingRef.current = true
+          const img = new Image()
+          img.onload = () => {
+            if (generation === generationRef.current) {
+              // Native front JPEG is landscape (e.g. 320x180). Rotate it to portrait
+              // BEFORE analysis; keep aspect ratio (no 320x180 -> 240x320 stretching).
+              ctx.save()
+              ctx.setTransform(1, 0, 0, 1, 0, 0)
+              ctx.fillStyle = '#000'
+              ctx.fillRect(0, 0, canvas.width, canvas.height)
+              const sourceW = img.naturalWidth
+              const sourceH = img.naturalHeight
+              // After rotation the source dimensions are sourceH x sourceW.
+              const scale = Math.min(canvas.width / sourceH, canvas.height / sourceW)
+              const w = sourceW * scale
+              const h = sourceH * scale
+              if (frontRotationRef.current === 'clockwise') {
+                ctx.translate(canvas.width / 2, canvas.height / 2)
+                ctx.rotate(Math.PI / 2)
+              } else {
+                ctx.translate(canvas.width / 2, canvas.height / 2)
+                ctx.rotate(-Math.PI / 2)
+              }
+              ctx.drawImage(img, -w / 2, -h / 2, w, h)
+              ctx.restore()
+              debugRef.current.frontFrameSize = `${img.naturalWidth}×${img.naturalHeight}`
+              frontFrameReadyRef.current = true
+              debugRef.current.frontDecoded++
+            }
+            frontDecodingRef.current = false
+          }
+          img.onerror = () => { frontDecodingRef.current = false }
+          img.src = `data:image/jpeg;base64,${jpeg}`
+        })
+        listenerRef.current = handle
+        if (generation !== generationRef.current) return
+        setMessage('④ 背面カメラを切り替え中…')
+        await onBeginNativeCameras()
+        nativeRef.current = true
+        setMessage('⑤ 前後カメラを起動中…')
+        try { await MultiCam.start() } catch (error) {
+          stop()
+          throw error
+        }
+        if (generation !== generationRef.current) return
+        runningRef.current = true
+        setState('on')
+        setMessage('前後カメラ起動済み。顔の映像を待っています…')
+        const loop = () => {
+          if (generation !== generationRef.current || !runningRef.current) return
+          const now = performance.now()
+          if (frontFrameReadyRef.current && now - lastAnalyzedRef.current >= 65) {
+            lastAnalyzedRef.current = now
+            try {
+              debugRef.current.analyzed++
+              const categories = landmarker.detectForVideo(canvas, now).faceBlendshapes?.[0]?.categories
+              if (categories) {
+                debugRef.current.detected++
+                debugRef.current.lastFaceAt = Date.now()
+                debugRef.current.jawOpen = score(categories, 'jawOpen')
+                debugRef.current.jawMax = Math.max(debugRef.current.jawMax, debugRef.current.jawOpen)
+                debugRef.current.smileRaw = (score(categories, 'mouthSmileLeft') + score(categories, 'mouthSmileRight')) / 2
+                debugRef.current.eyeBlinkL = score(categories, 'eyeBlinkLeft')
+                debugRef.current.mouthFunnel = score(categories, 'mouthFunnel')
+                debugRef.current.blendshapeCount = categories.length
+                setMessage(prev => prev.startsWith('表情追跡中') ? prev : '表情追跡中（顔の映像は表示・保存しません）')
+                scoresRef.current = {
+                  mouth: Math.min(1, score(categories, 'jawOpen') * 1.5),
+                  smile: Math.min(1, score(categories, 'mouthSmileLeft') + score(categories, 'mouthSmileRight')),
+                  leftEye: 1 - score(categories, 'eyeBlinkLeft'),
+                  rightEye: 1 - score(categories, 'eyeBlinkRight'),
+                }
+                debugRef.current.mouthTarget = scoresRef.current.mouth
+              }
+            } catch (error) {
+              debugRef.current.error = error instanceof Error ? error.message : String(error)
+              console.warn('Native tracking frame:', error)
+            }
+          }
+          frameRef.current = requestAnimationFrame(loop)
+        }
+        frameRef.current = requestAnimationFrame(loop)
+        return
+      }
+
+      const rearTrack = rearStreamRef.current?.getVideoTracks()[0]
+      if (!rearTrack || rearTrack.readyState !== 'live') throw new Error('背面カメラの起動後に試してください')
+      attemptedFrontCamera = true
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { exact: 'user' }, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 15 } },
+        audio: false,
+      })
+      if (generation !== generationRef.current) { stream.getTracks().forEach(t => t.stop()); return }
+      streamRef.current = stream
+      if (rearTrack.readyState !== 'live' || rearTrack.muted) {
+        await restoreRear()
+        return
+      }
+
+      const video = document.createElement('video')
+      video.muted = true
+      video.autoplay = true
+      video.playsInline = true
+      video.srcObject = stream
+      videoRef.current = video
+      await video.play()
+      if (generation !== generationRef.current) return
+      if (rearTrack.readyState !== 'live' || rearTrack.muted) {
+        await restoreRear()
+        return
+      }
       runningRef.current = true
-      await MultiCam.start()
-      if (disposedRef.current || generation !== generationRef.current) return
-      setCameraOn(true)
-      setMessage('✅ 前後カメラ起動成功。前面・背面の受信数が増えるか確認してね。')
+      setState('on')
+      setMessage('表情追跡中（顔の映像は表示・保存しません）')
+
+      const loop = () => {
+        if (!runningRef.current || generation !== generationRef.current) return
+        const now = performance.now()
+        if (rearTrack.readyState !== 'live' || rearTrack.muted) {
+          void restoreRear()
+          return
+        }
+        if (video.readyState >= 2 && now - lastAnalyzedRef.current >= 80) {
+          lastAnalyzedRef.current = now
+          try {
+            const result = landmarker.detectForVideo(video, now)
+            const categories = result.faceBlendshapes?.[0]?.categories
+            if (categories) {
+              scoresRef.current = {
+                mouth: Math.max(0, Math.min(1, score(categories, 'jawOpen') * 1.5)),
+                smile: Math.max(-1, Math.min(1, (score(categories, 'mouthSmileLeft') + score(categories, 'mouthSmileRight')))),
+                leftEye: 1 - score(categories, 'eyeBlinkLeft'),
+                rightEye: 1 - score(categories, 'eyeBlinkRight'),
+              }
+            }
+          } catch (error) { console.warn('Face tracking frame:', error) }
+        }
+        frameRef.current = requestAnimationFrame(loop)
+      }
+      frameRef.current = requestAnimationFrame(loop)
     } catch (error) {
-      if (!disposedRef.current && generation === generationRef.current)
-        setMessage(`❌ 同時起動失敗：${error instanceof Error ? error.message : String(error)}（カメラを復旧します）`)
-      await stopCameras()
-    } finally {
-      busyRef.current = false
-      if (!disposedRef.current) setBusy(false)
+      if (generation !== generationRef.current) return
+      if (attemptedFrontCamera) {
+        // Even getUserMedia rejection may have interrupted the rear camera.
+        await restoreRear()
+      } else {
+        stop()
+      }
+      setMessage(`表情追跡を開始できません: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
-  const buttonStyle = { padding: '8px 11px', borderRadius: 12, background: '#35214c', color: '#fff', fontSize: 12, border: '1px solid #aa89d6' }
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 5, alignItems: 'flex-start' }}>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-        <button type="button" style={buttonStyle} disabled={busy || cameraOn}
-          onClick={() => { void diagnoseMediaPipe() }}>MediaPipeだけ診断する</button>
-        <button type="button" style={buttonStyle} disabled={busy}
-          onClick={() => { void (cameraOn ? stopCameras() : diagnoseCameras()) }}>
-          {cameraOn ? '前後カメラを停止・復旧' : '前後カメラ同時起動テスト'}
-        </button>
-        {cameraOn && (
-          <button type="button" style={buttonStyle} disabled={busy}
-            onClick={() => {
-              if (analyzing) {
-                stopAnalysis()
-                setMessage('顔解析を停止。前後カメラは引き続き稼働中です。')
-              } else { void startAnalysis() }
-            }}>
-            {analyzing ? '顔解析だけ停止' : '顔認識・表情数値テスト'}
-          </button>
-        )}
-      </div>
-      {analyzing && (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-          <button type="button" style={{ ...buttonStyle, borderColor: '#55ddcb' }}
-            disabled={driving}
-            onClick={inspectMouthParameter}>
-            ① Live2D口パラメータ確認（書き込みなし）
-          </button>
-          {mouthParamReady && (
-            <button type="button" style={{ ...buttonStyle, borderColor: '#55ddcb' }}
-              onClick={() => {
-                drivingRef.current = !drivingRef.current
-                setDriving(drivingRef.current)
-                setDriveMessage(drivingRef.current ? '口だけ反映の準備中…' : '口だけ反映停止。顔解析は継続中。')
-              }}>
-              {driving ? '② 口だけ反映を停止' : '② 口だけ反映テスト'}
-            </button>
-          )}
-        </div>
-      )}
-      <span role="status" style={{ fontSize: 10, color: '#d8c8f2', maxWidth: 310, overflowWrap: 'anywhere' }}>{message}</span>
-      {driveMessage && <span role="status" style={{ fontSize: 10, color: '#a4f0d3', overflowWrap: 'anywhere' }}>{driveMessage}</span>}
-      {cameraOn && <span style={{ fontSize: 11, color: '#a4f0d3' }}>受信フレーム数：前面 {counts.front} / 背面 {counts.rear}（口だけ反映：{driving ? 'ON' : 'OFF'}）</span>}
-      {analyzing && (
-        <div style={{ fontSize: 11, lineHeight: 1.7, color: '#a4f0d3', overflowWrap: 'anywhere' }}>
-          解析 {faceData.analyzed} 回 / 顔検出 {faceData.detected} 回
-          <div>口の開き: {(faceData.mouth * 100).toFixed(0)}% / 笑顔: {(faceData.smile * 100).toFixed(0)}%</div>
-          <div>左まばたき: {(faceData.blinkL * 100).toFixed(0)}% / 右まばたき: {(faceData.blinkR * 100).toFixed(0)}%</div>
-          <div style={{ color: '#c8b4ea' }}>※ 前面映像は画面表示・保存・送信しません。Live2D反映は口だけを手動でテストします。</div>
-        </div>
-      )}
-    </div>
-  )
+  // Start automatically when the rear camera is ready. Wait for it so that
+  // initial getUserMedia cannot race with native MultiCam startup. Once started,
+  // keep this component mounted while native cameras temporarily set ready=false.
+  useEffect(() => {
+    if (!rearCameraReady || autoStartRequestedRef.current) return
+    autoStartRequestedRef.current = true
+    void start()
+  }, [rearCameraReady])
+
+  // Tracking is automatic; keep only a small status message (no control button).
+  return message ? (
+    <span role="status" style={{ fontSize: 10, color: '#d8c8f2', maxWidth: 280 }}>{message}</span>
+  ) : null
 }

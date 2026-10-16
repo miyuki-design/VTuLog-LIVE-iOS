@@ -472,6 +472,7 @@ export default function App() {
   const hiddenVideoRef = useRef<HTMLVideoElement>(null)
   const cameraStreamRef = useRef<MediaStream | null>(null)
   const nativeRearModeRef = useRef(false)
+  const nativeRearStoppingRef = useRef(false)
   const nativeRearImageRef = useRef<HTMLImageElement | null>(null)
   const rearFrameBusyRef = useRef(false)
   const [cameraReady, setCameraReady] = useState(false)
@@ -1272,6 +1273,7 @@ const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const beginNativeCameras = useCallback(async () => {
     nativeRearModeRef.current = true
+    nativeRearStoppingRef.current = false
     setCameraReady(false)
     cameraStreamRef.current?.getTracks().forEach(track => track.stop())
     cameraStreamRef.current = null
@@ -1282,12 +1284,17 @@ const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
     nativeRearImageRef.current = null
   }, [])
 
+  const markNativeCamerasStopping = useCallback(() => {
+    nativeRearStoppingRef.current = true
+    setCameraReady(false)
+  }, [])
+
   const receiveNativeRearFrame = useCallback((jpeg: string) => {
-    if (!nativeRearModeRef.current || rearFrameBusyRef.current) return
+    if (!nativeRearModeRef.current || nativeRearStoppingRef.current || rearFrameBusyRef.current) return
     rearFrameBusyRef.current = true
     const image = new Image()
     image.onload = () => {
-      if (nativeRearModeRef.current) {
+      if (nativeRearModeRef.current && !nativeRearStoppingRef.current) {
         nativeRearImageRef.current = image
         setCameraReady(true)
       }
@@ -1298,10 +1305,16 @@ const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   }, [])
 
   const endNativeCameras = useCallback(async () => {
-    nativeRearModeRef.current = false
+    nativeRearStoppingRef.current = true
     nativeRearImageRef.current = null
     rearFrameBusyRef.current = false
-    await restoreRearCamera()
+    setCameraReady(false)
+    try {
+      await restoreRearCamera()
+    } finally {
+      nativeRearModeRef.current = false
+      nativeRearStoppingRef.current = false
+    }
   }, [restoreRearCamera])
 
   // ── Load avatar image ──
@@ -3179,10 +3192,12 @@ useEffect(() => {
         {rtcRole !== 'receiver' && isLive2DActive && (
           <div className="px-5 pb-2 shrink-0 z-10">
             <FaceTracking pixiAppRef={live2d.pixiAppRef}
+              rearCameraReady={cameraReady}
               rearStreamRef={cameraStreamRef}
               onRearCameraInterrupted={restoreRearCamera}
               onBeginNativeCameras={beginNativeCameras}
               onNativeRearFrame={receiveNativeRearFrame}
+              onNativeCamerasStopping={markNativeCamerasStopping}
               onEndNativeCameras={endNativeCameras} />
           </div>
         )}
