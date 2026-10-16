@@ -58,30 +58,50 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onBeginNativeCameras, 
   // Step 1: inspect parameters without subscribing to the Live2D update loop.
   // This is safe to run while camera and MediaPipe are active.
   const inspectMouthParameter = () => {
-    const model: any = pixiAppRef.current?.stage?.children?.find(
-      (child: any) => child?.internalModel?.coreModel
-    )
-    const core: any = model?.internalModel?.coreModel
-    const raw: any = core?._model?.parameters
-    if (!core || !raw) {
+    // Show visible feedback BEFORE touching any Live2D internals.
+    setMouthParamReady(false)
+    setDriveMessage('🔎 Live2D口パラメータを確認しています…（書き込みなし）')
+    try {
+      const app: any = pixiAppRef.current
+      if (!app?.stage) {
+        setDriveMessage('❌ Pixiのstageがありません。モデルを再読み込みしてください。')
+        return
+      }
+      const children = app.stage.children ?? []
+      const model: any = children.find((child: any) => child?.internalModel?.coreModel)
+      if (!model) {
+        setDriveMessage(`❌ Live2Dの内部モデルがありません（stageの要素数: ${children.length}）。`)
+        return
+      }
+      const core: any = model.internalModel.coreModel
+      const raw: any = core?._model?.parameters
+      if (!core || !raw) {
+        setDriveMessage('❌ Live2Dのパラメータ配列を取得できません。')
+        return
+      }
+      const count = Number(raw.count ?? core.getParameterCount?.() ?? 0)
+      if (!Number.isFinite(count) || count < 1 || count > 10000) {
+        setDriveMessage(`❌ パラメータ数が不正です（${count}）。`)
+        return
+      }
+      let index = -1
+      // Some Cubism bindings expose ids as strings or handle objects.
+      for (let i = 0; i < count; i++) {
+        const id = raw.ids?.[i] ?? core.getParameterId?.(i)
+        const name = typeof id?.getString === 'function' ? id.getString() : String(id ?? '')
+        if (name === 'ParamMouthOpenY') { index = i; break }
+      }
+      const writable = typeof core.setParameterValueByIndex === 'function'
+      setMouthParamReady(index >= 0 && writable)
+      setDriveMessage(index < 0
+        ? `⚠️ ParamMouthOpenYが見つかりません（総数: ${count}）。書き込みはしていません。`
+        : writable
+          ? `✅ 口パラメータ確認OK（index=${index} / 総数=${count}）。書き込みなし。`
+          : '⚠️ 口パラメータはありますが、書き込みAPIがありません。')
+    } catch (error) {
       setMouthParamReady(false)
-      setDriveMessage('❌ Live2D内部モデルを取得できません。書き込みは行っていません。')
-      return
+      setDriveMessage(`❌ 読み取り中にエラー: ${error instanceof Error ? error.message : String(error)}`)
     }
-    const count = raw?.count ?? 0
-    let index = -1
-    for (let i = 0; i < count; i++) {
-      const id = raw?.ids?.[i]
-      const name = typeof id?.getString === 'function' ? id.getString() : String(id)
-      if (name === 'ParamMouthOpenY') { index = i; break }
-    }
-    const writable = typeof core.setParameterValueByIndex === 'function'
-    setMouthParamReady(index >= 0 && writable)
-    setDriveMessage(index < 0
-      ? '⚠️ ParamMouthOpenY が見つかりません。書き込みは行っていません。'
-      : writable
-        ? `✅ 口パラメータ確認OK（index=${index}）。まだ書き込みはしていません。`
-        : '⚠️ パラメータはありますが、書き込みAPIが見つかりません。')
   }
 
   // Step 2: write to ONLY the mouth opening parameter when manually enabled.
