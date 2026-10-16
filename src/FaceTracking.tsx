@@ -55,15 +55,18 @@ const emptyDebug = (): TrackingDebug => ({
 
 /** Front camera frames are analyzed privately; selfie images are not shown or recorded. */
 export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupted,
-  onBeginNativeCameras, onNativeRearFrame, onEndNativeCameras }: {
+  onBeginNativeCameras, onNativeRearFrame, onNativeCamerasStopping, onEndNativeCameras, rearCameraReady }: {
   pixiAppRef: PixiRef
+  rearCameraReady: boolean
   rearStreamRef: MutableRefObject<MediaStream | null>
   onRearCameraInterrupted: () => Promise<void>
   onBeginNativeCameras: () => Promise<void>
   onNativeRearFrame: (jpeg: string) => void
+  onNativeCamerasStopping: () => void
   onEndNativeCameras: () => Promise<void>
 }) {
   const [state, setState] = useState<'off' | 'starting' | 'on'>('off')
+  const autoStartRequestedRef = useRef(false)
   const [message, setMessage] = useState('')
   // iPhone 17 native JPEG orientation: counterclockwise is upright.
   const frontRotationRef = useRef<'clockwise' | 'counterclockwise'>('counterclockwise')
@@ -107,7 +110,10 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
     listenerRef.current = null
     if (nativeRef.current) {
       nativeRef.current = false
-      void MultiCam.stop().finally(() => { void onEndNativeCameras() })
+      onNativeCamerasStopping()
+      void MultiCam.stop().catch(error => {
+        console.warn('Native camera stop:', error)
+      }).finally(() => { void onEndNativeCameras() })
     }
   }
 
@@ -195,6 +201,7 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
   }, [pixiAppRef, state])
 
   useEffect(() => () => {
+    autoStartRequestedRef.current = false
     generationRef.current++
     runningRef.current = false
     if (frameRef.current !== null) cancelAnimationFrame(frameRef.current)
@@ -204,7 +211,10 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
     void listenerRef.current?.remove()
     if (nativeRef.current) {
       nativeRef.current = false
-      void MultiCam.stop().finally(() => { void onEndNativeCameras() })
+      onNativeCamerasStopping()
+      void MultiCam.stop().catch(error => {
+        console.warn('Native camera stop:', error)
+      }).finally(() => { void onEndNativeCameras() })
     }
   }, [])
 
@@ -406,14 +416,16 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
     }
   }
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
-      <button type="button" disabled={recoveringRef.current}
-        onClick={state !== 'off' ? () => { stop(); setMessage('表情追跡を停止しました') } : start}
-        style={{ padding: '7px 10px', borderRadius: 12, background: '#35214c', color: '#fff', fontSize: 12, border: '1px solid #aa89d6' }}>
-        {state === 'on' ? '表情追跡を停止' : state === 'starting' ? '準備を中止' : '表情追跡を開始'}
-      </button>
-      {message && <span role="status" style={{ fontSize: 10, color: '#d8c8f2', maxWidth: 280 }}>{message}</span>}
-    </div>
-  )
+  // Wait for the original rear camera so native MultiCam does not race getUserMedia.
+  // Do not unmount the tracker when native cameras temporarily set ready=false.
+  useEffect(() => {
+    if (!rearCameraReady || autoStartRequestedRef.current) return
+    autoStartRequestedRef.current = true
+    void start()
+  }, [rearCameraReady])
+
+  // Tracking is automatic; display status without the manual start/stop button.
+  return message ? (
+    <span role="status" style={{ fontSize: 10, color: '#d8c8f2', maxWidth: 280 }}>{message}</span>
+  ) : null
 }
