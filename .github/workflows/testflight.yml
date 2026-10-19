@@ -112,7 +112,7 @@ jobs:
               raise SystemExit('Custom bridge view controller was not installed in Main.storyboard')
           print('Custom view controller: VTuLogBridgeViewController')
           PYCODE
-            - name: Set VTuLog LIVE iOS app icon
+                - name: Set VTuLog LIVE iOS app icon
         run: |
           set -euo pipefail
           ICON_SOURCE='public/VTuLogLIVEicon.png'
