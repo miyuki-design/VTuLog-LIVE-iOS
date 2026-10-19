@@ -529,6 +529,9 @@ export default function App() {
   const [liveTime, setLiveTime] = useState(0)
   const [youtubeLiveStatus, setYoutubeLiveStatus] =
   useState<YouTubeLiveStatus>('idle')
+  const [twitchLiveStatus, setTwitchLiveStatus] = useState<
+  'idle' | 'checking' | 'live' | 'waiting' | 'unavailable'
+  >('idle')
   const [streamTransportStatus, setStreamTransportStatus] =
     useState<StreamTransportStatus>('idle')
 
@@ -1172,7 +1175,21 @@ const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
       return `✅ ${platform}への送信終了`
     }
     // 送信成功のみでTwitch上での配信公開まで確認できたとは断定しない。
-    if (streamTarget === 'twitch') return '🟣 Twitchへ映像送信中（公開未確認）'
+    if (streamTarget === 'twitch') {
+  if (twitchLiveStatus === 'live') {
+    return '🔴 Twitch LIVE配信中'
+  }
+
+  if (twitchLiveStatus === 'waiting') {
+    return '🟠 Twitchでの配信開始を確認中'
+  }
+
+  if (twitchLiveStatus === 'unavailable') {
+    return '⚠️ Twitchの公開状況を確認できません'
+  }
+
+  return '🟣 Twitchへ映像送信中（公開確認待ち）'
+}
     return youtubeLiveStatus === 'live'
       ? '🔴 YouTube LIVE配信中'
       : '🔴 YouTubeへ映像送信中（公開確認待ち）'
@@ -1928,6 +1945,87 @@ const bindYouTubeBroadcast = useCallback(async () => {
     )
   }
 }, [])
+
+// ── Twitch LIVE状態確認 ──
+useEffect(() => {
+  if (appState !== 'live' || streamTarget !== 'twitch') {
+    setTwitchLiveStatus('idle')
+    return
+  }
+
+  let disposed = false
+  let checking = false
+
+  const checkTwitchLive = async () => {
+    if (disposed || checking) return
+
+    const token = twitchAuthToken
+    const clientId = twitchClientId.trim()
+    const broadcasterId = twitchBroadcasterId
+
+    if (!token || !clientId || !broadcasterId) {
+      setTwitchLiveStatus('unavailable')
+      return
+    }
+
+    checking = true
+
+    try {
+      const response = await fetch(
+        `https://api.twitch.tv/helix/streams?user_id=${encodeURIComponent(broadcasterId)}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Client-Id': clientId,
+          },
+          cache: 'no-store',
+        }
+      )
+
+      if (!response.ok) {
+        throw new Error(`Twitch API ${response.status}`)
+      }
+
+      const data = await response.json()
+
+      if (disposed) return
+
+      const isLive = data.data?.some(
+        (stream: { type?: string }) => stream.type === 'live'
+      )
+
+      setTwitchLiveStatus(isLive ? 'live' : 'waiting')
+    } catch (error) {
+      console.warn('Twitch LIVE確認失敗:', error)
+
+      if (!disposed) {
+        setTwitchLiveStatus('unavailable')
+      }
+    } finally {
+      checking = false
+    }
+  }
+
+  setTwitchLiveStatus('checking')
+
+  void checkTwitchLive()
+
+  const interval = window.setInterval(
+    () => void checkTwitchLive(),
+    15000
+  )
+
+  return () => {
+    disposed = true
+    window.clearInterval(interval)
+  }
+}, [
+  appState,
+  streamTarget,
+  twitchAuthToken,
+  twitchClientId,
+  twitchBroadcasterId,
+])
   
 // ── YouTube コメント自動更新 ──
 useEffect(() => {
