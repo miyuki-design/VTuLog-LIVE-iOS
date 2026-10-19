@@ -1,0 +1,255 @@
+name: VTuLog LIVE iOS to TestFlight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      APP_BUNDLE_ID: dev.miminoz.vtuloglive
+      APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+
+    steps:
+      - name: Confirm distribution credentials are configured
+        env:
+          DISTRIBUTION_P12_B64: ${{ secrets.IOS_DISTRIBUTION_P12_BASE64 }}
+          DISTRIBUTION_P12_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_P12_PASSWORD }}
+          APP_PROFILE_B64: ${{ secrets.IOS_APPSTORE_PROFILE_BASE64 }}
+          APPSTORE_ISSUER_ID: ${{ vars.APPSTORE_ISSUER_ID }}
+          APPSTORE_API_KEY_ID: ${{ vars.APPSTORE_API_KEY_ID }}
+          APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          for key in APPLE_TEAM_ID DISTRIBUTION_P12_B64 DISTRIBUTION_P12_PASSWORD APP_PROFILE_B64 APPSTORE_ISSUER_ID APPSTORE_API_KEY_ID APPSTORE_API_PRIVATE_KEY; do
+            if [ -z "${!key:-}" ]; then
+              echo "Missing GitHub Actions variable/secret: $key" >&2
+              exit 1
+            fi
+          done
+
+
+      - name: Select Xcode 26 for App Store Connect
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Add native OAuth plugins (Capacitor 7)
+        run: |
+          pnpm add @capacitor/app@7.1.2 @capacitor/browser@7.0.2
+
+      - name: Build iOS web assets
+        run: pnpm run build:ios
+
+      - name: Generate iOS project
+        run: pnpm exec cap add ios
+
+      - name: Sync Capacitor
+        run: pnpm exec cap sync ios
+
+      - name: Install native simultaneous front/rear camera bridge
+        run: |
+          set -e
+          APP_DIR='ios/App/App'
+          test -f "$APP_DIR/AppDelegate.swift"
+          test -f "$APP_DIR/Base.lproj/Main.storyboard"
+          printf "\n" >> "$APP_DIR/AppDelegate.swift"
+          cat MultiCamPlugin.swift >> "$APP_DIR/AppDelegate.swift"
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import re
+          storyboard = Path('ios/App/App/Base.lproj/Main.storyboard')
+          text = storyboard.read_text()
+          text, count = re.subn(
+              r'customClass="CAPBridgeViewController"(?: customModule="[^"]*")?(?: customModuleProvider="[^"]*")?',
+              'customClass="VTuLogBridgeViewController" customModule="App" customModuleProvider="target"', text)
+          if count != 1:
+              raise SystemExit(f'Expected one Capacitor view controller, found {count}')
+          storyboard.write_text(text)
+          PYCODE
+
+      - name: Register MultiCam in Capacitor native plugin list
+        run: |
+          set -e
+          python3 - <<'PYCODE'
+          import json
+          from pathlib import Path
+          config_file = Path('ios/App/App/capacitor.config.json')
+          if not config_file.is_file():
+              raise SystemExit(f'Missing native Capacitor configuration: {config_file}')
+          config = json.loads(config_file.read_text(encoding='utf-8'))
+          plugins = config.get('packageClassList', [])
+          if not isinstance(plugins, list):
+              raise SystemExit('Invalid packageClassList in capacitor.config.json')
+          if 'MultiCamPlugin' not in plugins:
+              plugins.append('MultiCamPlugin')
+          config['packageClassList'] = plugins
+          config_file.write_text(json.dumps(config, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+          print('Native plugin classes:', ', '.join(plugins))
+          storyboard_file = Path('ios/App/App/Base.lproj/Main.storyboard')
+          storyboard = storyboard_file.read_text(encoding='utf-8')
+          if 'customClass="VTuLogBridgeViewController"' not in storyboard:
+              raise SystemExit('Custom bridge view controller was not installed in Main.storyboard')
+          print('Custom view controller: VTuLogBridgeViewController')
+          PYCODE
+
+      - name: Configure camera, microphone and OAuth callback
+        run: |
+          PLIST="ios/App/App/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :NSCameraUsageDescription VTuLog LIVE uses the camera for live streaming." "$PLIST" \
+            || /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string VTuLog LIVE uses the camera for live streaming." "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :NSMicrophoneUsageDescription VTuLog LIVE uses the microphone for live streaming." "$PLIST" \
+            || /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string VTuLog LIVE uses the microphone for live streaming." "$PLIST"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes array' "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0 dict' "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleURLName string dev.miminoz.vtuloglive.oauth' "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleURLSchemes array' "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string vtuloglive' "$PLIST" 2>/dev/null \
+            || /usr/libexec/PlistBuddy -c 'Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 vtuloglive' "$PLIST"
+
+      - name: Add native Google OAuth callback scheme
+        run: |
+          PLIST="ios/App/App/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:1 dict' "$PLIST"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:1:CFBundleURLName string dev.miminoz.vtuloglive.google' "$PLIST"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:1:CFBundleURLSchemes array' "$PLIST"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:1:CFBundleURLSchemes:0 string dev.miminoz.vtuloglive' "$PLIST"
+
+      - name: Install Apple signing certificate and provisioning profile
+        env:
+          DISTRIBUTION_P12_B64: ${{ secrets.IOS_DISTRIBUTION_P12_BASE64 }}
+          DISTRIBUTION_P12_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_P12_PASSWORD }}
+          APP_PROFILE_B64: ${{ secrets.IOS_APPSTORE_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+          CERT_PATH="$RUNNER_TEMP/ios-distribution.p12"
+          PROFILE_PATH="$RUNNER_TEMP/ios-appstore.mobileprovision"
+          KEYCHAIN_PATH="$RUNNER_TEMP/vtulog-live-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+
+          printf '%s' "$DISTRIBUTION_P12_B64" | base64 -D > "$CERT_PATH"
+          printf '%s' "$APP_PROFILE_B64" | base64 -D > "$PROFILE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$DISTRIBUTION_P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+
+          security cms -D -i "$PROFILE_PATH" > "$RUNNER_TEMP/profile.plist"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' "$RUNNER_TEMP/profile.plist")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print Name' "$RUNNER_TEMP/profile.plist")
+          PROFILE_APP_ID=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$RUNNER_TEMP/profile.plist")
+          if [ "$PROFILE_APP_ID" != "${APPLE_TEAM_ID}.${APP_BUNDLE_ID}" ]; then
+            echo "The provisioning profile's bundle ID / team does not match the app." >&2
+            exit 1
+          fi
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          echo "PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
+
+      # IMPORTANT: Never pass provisioning-profile build settings to xcodebuild
+      # on the command line: those settings get applied to every CocoaPods target.
+      - name: Configure manual signing on App target only
+        run: |
+          set -euo pipefail
+          ruby <<'RUBY'
+          require 'xcodeproj'
+
+          project = Xcodeproj::Project.open('ios/App/App.xcodeproj')
+          app = project.targets.find { |t| t.name == 'App' }
+          abort 'App target not found' unless app
+          release = app.build_configurations.find { |c| c.name == 'Release' }
+          abort 'Release configuration not found for App target' unless release
+
+          settings = release.build_settings
+          settings['DEVELOPMENT_TEAM'] = ENV.fetch('APPLE_TEAM_ID')
+          settings['PRODUCT_BUNDLE_IDENTIFIER'] = ENV.fetch('APP_BUNDLE_ID')
+          settings['PROVISIONING_PROFILE_SPECIFIER'] = ENV.fetch('PROFILE_NAME')
+          settings['CODE_SIGN_STYLE'] = 'Manual'
+          settings['CODE_SIGN_IDENTITY'] = 'Apple Distribution'
+          settings['CODE_SIGN_IDENTITY[sdk=iphoneos*]'] = 'Apple Distribution'
+          settings['CURRENT_PROJECT_VERSION'] = ENV.fetch('GITHUB_RUN_NUMBER')
+          settings['MARKETING_VERSION'] = '1.0.0'
+
+          project.save
+          puts 'Configured App Release signing (Pods targets are unchanged).'
+          RUBY
+
+      - name: Create distribution archive
+        run: |
+          set -euo pipefail
+          if [ -d ios/App/App.xcworkspace ]; then
+            XCODE_TARGET=(-workspace ios/App/App.xcworkspace)
+          else
+            XCODE_TARGET=(-project ios/App/App.xcodeproj)
+          fi
+          xcodebuild "${XCODE_TARGET[@]}" \
+            -scheme App \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/VTuLog-LIVE.xcarchive" \
+            archive
+
+      - name: Export App Store Connect IPA
+        id: export
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          import os, plistlib
+          from pathlib import Path
+          data = {
+              'method': 'app-store-connect',
+              'signingStyle': 'manual',
+              'signingCertificate': 'Apple Distribution',
+              'teamID': os.environ['APPLE_TEAM_ID'],
+              'provisioningProfiles': {os.environ['APP_BUNDLE_ID']: os.environ['PROFILE_NAME']},
+              'manageAppVersionAndBuildNumber': False,
+          }
+          with open(Path(os.environ['RUNNER_TEMP']) / 'ExportOptions.plist', 'wb') as f:
+              plistlib.dump(data, f)
+          PYCODE
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/VTuLog-LIVE.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/testflight-live-export"
+          IPA_PATH="$(find "$RUNNER_TEMP/testflight-live-export" -maxdepth 1 -name '*.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Upload IPA to TestFlight
+        uses: apple-actions/upload-testflight-build@v5
+        with:
+          app-path: ${{ steps.export.outputs.ipa_path }}
+          issuer-id: ${{ vars.APPSTORE_ISSUER_ID }}
+          api-key-id: ${{ vars.APPSTORE_API_KEY_ID }}
+          api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          wait-for-processing: 'true'
+
+      - name: Remove temporary signing keychain
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/vtulog-live-signing.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/vtulog-live-signing.keychain-db" || true
+          fi
