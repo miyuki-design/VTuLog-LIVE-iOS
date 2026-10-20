@@ -156,3 +156,16 @@ html, body, #root {
   background-size: 200% 100%;
   animation: shimmer 2s linear infinite;
 }
+
+/* ========================================
+   iPhone / iOS
+   文字入力時の自動ズーム防止
+   ======================================== */
+
+@supports (-webkit-touch-callout: none) {
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+}
