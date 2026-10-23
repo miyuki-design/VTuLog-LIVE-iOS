@@ -157,5 +157,6 @@ class VTuLogBridgeViewController: CAPBridgeViewController {
     override func capacitorDidLoad() {
         super.capacitorDidLoad()
         bridge?.registerPluginInstance(MultiCamPlugin())
+        bridge?.registerPluginInstance(NativeAudioPlugin())
     }
 }
