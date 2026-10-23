@@ -75,6 +75,8 @@ jobs:
           test -f "$APP_DIR/Base.lproj/Main.storyboard"
           printf "\n" >> "$APP_DIR/AppDelegate.swift"
           cat MultiCamPlugin.swift >> "$APP_DIR/AppDelegate.swift"
+          printf "\n" >> "$APP_DIR/AppDelegate.swift"
+          cat NativeAudioPlugin.swift >> "$APP_DIR/AppDelegate.swift"
           python3 - <<'PYCODE'
           from pathlib import Path
           import re
@@ -103,6 +105,8 @@ jobs:
               raise SystemExit('Invalid packageClassList in capacitor.config.json')
           if 'MultiCamPlugin' not in plugins:
               plugins.append('MultiCamPlugin')
+          if 'NativeAudioPlugin' not in plugins:
+              plugins.append('NativeAudioPlugin')
           config['packageClassList'] = plugins
           config_file.write_text(json.dumps(config, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
           print('Native plugin classes:', ', '.join(plugins))
