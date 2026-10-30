@@ -122,8 +122,14 @@ export class FaceMotionController {
     return {
       mouth: clamp(get('jawOpen') * 1.5, 0, 1),
       smile: clamp(get('mouthSmileLeft') + get('mouthSmileRight'), -1, 1),
-      leftEye: clamp(1 - get('eyeBlinkLeft'), 0, 1),
-      rightEye: clamp(1 - get('eyeBlinkRight'), 0, 1),
+      // EyeBlink alone saturates at 1 while the eyes are merely open.
+      // EyeWide is a separate MediaPipe blendshape for deliberate widening.
+      // Normal open ~0.53 maps to ~1.0 on this model's 0..1.9 range.
+      // Full deliberate widening maps to 1.9; blinks still reach 0.
+      leftEye: clamp((1 - get('eyeBlinkLeft')) *
+        (0.53 + 0.47 * clamp((get('eyeWideLeft') - 0.08) / 0.45, 0, 1)), 0, 1),
+      rightEye: clamp((1 - get('eyeBlinkRight')) *
+        (0.53 + 0.47 * clamp((get('eyeWideRight') - 0.08) / 0.45, 0, 1)), 0, 1),
       headX, headY, headZ, bodyX, bodyY, bodyZ,
     }
   }
