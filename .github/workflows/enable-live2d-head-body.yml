@@ -1,0 +1,276 @@
+name: Enable Live2D head and body tracking
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Write face motion engine and apply guarded patch
+        shell: bash
+        run: |
+          cat > /tmp/faceMotion.ts <<'FACE_MOTION_SOURCE_99'
+          /**
+           * Face pose -> Live2D parameters shared by recording and live apps.
+           * A face landmark model does NOT track shoulders; body motion here is a
+           * deliberately smaller, delayed follow-through of head movement and face position.
+           */
+          export type TrackingScores = {
+            mouth: number
+            smile: number
+            leftEye: number
+            rightEye: number
+            headX: number
+            headY: number
+            headZ: number
+            bodyX: number
+            bodyY: number
+            bodyZ: number
+          }
+          
+          export const REST: TrackingScores = {
+            mouth: 0, smile: 0, leftEye: 1, rightEye: 1,
+            headX: 0, headY: 0, headZ: 0, bodyX: 0, bodyY: 0, bodyZ: 0,
+          }
+          
+          type Category = { categoryName: string; score: number }
+          type FrameResult = {
+            faceBlendshapes?: ReadonlyArray<{ categories?: ReadonlyArray<Category> }>
+            faceLandmarks?: ReadonlyArray<ReadonlyArray<{ x: number; y: number }>>
+            facialTransformationMatrixes?: ReadonlyArray<{ data: ArrayLike<number> }>
+          }
+          type Pose = { yaw: number; pitch: number; roll: number; x: number; y: number }
+          
+          const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v))
+          const degrees = (radians: number) => radians * 180 / Math.PI
+          
+          function readPose(result: FrameResult): Pose | null {
+            const matrix = result.facialTransformationMatrixes?.[0]?.data
+            const landmarks = result.faceLandmarks?.[0]
+            if (!matrix || matrix.length < 16 || !landmarks?.[33] || !landmarks?.[263]) return null
+          
+            // Face Landmarker returns a row-major 4x4 facial pose matrix. Use its
+            // rotation portion, not absolute translation (which depends on the camera).
+            const yaw = degrees(Math.asin(clamp(-matrix[8], -1, 1)))
+            const pitch = degrees(Math.atan2(matrix[9], matrix[10]))
+            const roll = degrees(Math.atan2(matrix[4], matrix[0]))
+            const x = (landmarks[33].x + landmarks[263].x) / 2
+            const y = (landmarks[33].y + landmarks[263].y) / 2
+            if (![yaw, pitch, roll, x, y].every(Number.isFinite)) return null
+            return { yaw, pitch, roll, x, y }
+          }
+          
+          /** Recenter on startup / after a long face loss; never store camera frames. */
+          export class FaceMotionController {
+            private neutral: Pose | null = null
+            private calibrationFrames = 0
+            private lastSeen = 0
+          
+            reset() {
+              this.neutral = null
+              this.calibrationFrames = 0
+              this.lastSeen = 0
+            }
+          
+            update(result: FrameResult, now: number): TrackingScores | null {
+              const categories = result.faceBlendshapes?.[0]?.categories
+              if (!categories) return null
+              const get = (id: string) => categories.find(c => c.categoryName === id)?.score ?? 0
+              const pose = readPose(result)
+              let headX = 0, headY = 0, headZ = 0, bodyX = 0, bodyY = 0, bodyZ = 0
+          
+              if (pose) {
+                if (!this.neutral || (this.lastSeen > 0 && now - this.lastSeen > 2000)) {
+                  this.neutral = { ...pose }
+                  this.calibrationFrames = 1
+                } else if (this.calibrationFrames < 8) {
+                  this.calibrationFrames += 1
+                  const k = 1 / this.calibrationFrames
+                  this.neutral = {
+                    yaw: this.neutral.yaw + (pose.yaw - this.neutral.yaw) * k,
+                    pitch: this.neutral.pitch + (pose.pitch - this.neutral.pitch) * k,
+                    roll: this.neutral.roll + (pose.roll - this.neutral.roll) * k,
+                    x: this.neutral.x + (pose.x - this.neutral.x) * k,
+                    y: this.neutral.y + (pose.y - this.neutral.y) * k,
+                  }
+                }
+                const base = this.neutral
+                headX = clamp((pose.yaw - base.yaw) * 1.15, -30, 30)
+                headY = clamp(-(pose.pitch - base.pitch) * 1.1, -25, 25)
+                headZ = clamp((pose.roll - base.roll) * 1.0, -25, 25)
+                // Body follows subtly; true independent torso tracking requires a pose model.
+                const shiftX = clamp((pose.x - base.x) * 65, -15, 15)
+                const shiftY = clamp((base.y - pose.y) * 60, -12, 12)
+                bodyX = clamp(headX * 0.34 + shiftX * 0.65, -15, 15)
+                bodyY = clamp(headY * 0.26 + shiftY * 0.55, -10, 10)
+                bodyZ = clamp(headZ * 0.38 + shiftX * 0.3, -12, 12)
+              }
+          
+              this.lastSeen = now
+              return {
+                mouth: clamp(get('jawOpen') * 1.5, 0, 1),
+                smile: clamp(get('mouthSmileLeft') + get('mouthSmileRight'), -1, 1),
+                leftEye: clamp(1 - get('eyeBlinkLeft'), 0, 1),
+                rightEye: clamp(1 - get('eyeBlinkRight'), 0, 1),
+                headX, headY, headZ, bodyX, bodyY, bodyZ,
+              }
+            }
+          
+            /** Fade to rest via the Live2D smoother instead of freezing the last frame. */
+            whenMissing(now: number): TrackingScores | null {
+              if (this.lastSeen === 0 || now - this.lastSeen < 450) return null
+              if (now - this.lastSeen > 2000) {
+                this.neutral = null
+                this.calibrationFrames = 0
+              }
+              return { ...REST }
+            }
+          }
+          FACE_MOTION_SOURCE_99
+          cat > /tmp/apply-face-motion.mjs <<'PATCH_SCRIPT_99'
+          /**
+           * Safe, one-off patch for miyuki-design/VTuLog-LIVE-iOS main.
+           * Run from a clean checkout of VTuLog-LIVE-iOS:
+           *   node apply-face-motion.mjs
+           * A replacement only happens after every known source pattern matches.
+           */
+          import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+          import { resolve } from 'node:path'
+          
+          const sourcePath = resolve(process.cwd(), 'src/FaceTracking.tsx')
+          const helperPath = resolve(process.cwd(), 'src/faceMotion.ts')
+          if (!existsSync(sourcePath)) throw new Error('Run this from the VTuLog-LIVE-iOS repository root.')
+          if (!existsSync(helperPath)) throw new Error('Copy faceMotion.ts into src/ before running this script.')
+          let code = readFileSync(sourcePath, 'utf8')
+          if (code.includes("from './faceMotion'")) {
+            console.log('Already patched; no changes made.')
+            process.exit(0)
+          }
+          
+          function replaceOnce(before, after, description) {
+            const position = code.indexOf(before)
+            if (position === -1) throw new Error(`Aborted; source changed (missing ${description}). No changes were written.`)
+            if (code.indexOf(before, position + before.length) !== -1) {
+              throw new Error(`Aborted; duplicate source pattern (${description}). No changes were written.`)
+            }
+            code = code.slice(0, position) + after + code.slice(position + before.length)
+          }
+          
+          replaceOnce(
+            "import type { PluginListenerHandle } from '@capacitor/core'",
+            "import type { PluginListenerHandle } from '@capacitor/core'\nimport { FaceMotionController, REST, type TrackingScores } from './faceMotion'",
+            'motion import',
+          )
+          replaceOnce(
+            "type Scores = { mouth: number; smile: number; leftEye: number; rightEye: number }\nconst DEFAULT: Scores = { mouth: 0, smile: 0, leftEye: 1, rightEye: 1 }",
+            "type Scores = TrackingScores\nconst DEFAULT: Scores = REST",
+            'scores type',
+          )
+          replaceOnce(
+            "  const scoresRef = useRef<Scores>({ ...DEFAULT })",
+            "  const scoresRef = useRef<Scores>({ ...DEFAULT })\n  const motionRef = useRef(new FaceMotionController())",
+            'motion controller',
+          )
+          replaceOnce(
+            "    scoresRef.current = { ...DEFAULT }\n    frontFrameReadyRef.current = false",
+            "    scoresRef.current = { ...DEFAULT }\n    motionRef.current.reset()\n    frontFrameReadyRef.current = false",
+            'stop and reset',
+          )
+          replaceOnce(
+            "    const keys = ['ParamMouthOpenY', 'ParamMouthForm', 'ParamEyeLOpen', 'ParamEyeROpen']\n    debugRef.current.parameters = keys.map((k, i) =>\n      `${['口開','口形','左目','右目'][i]}:${params.has(k) ? '有' : '無'}`",
+            "    const keys = ['ParamMouthOpenY', 'ParamMouthForm', 'ParamEyeLOpen', 'ParamEyeROpen',\n      'ParamAngleX', 'ParamAngleY', 'ParamAngleZ', 'ParamBodyAngleX', 'ParamBodyAngleY', 'ParamBodyAngleZ']\n    debugRef.current.parameters = keys.map((k, i) =>\n      `${['口開','口形','左目','右目','頭X','頭Y','頭Z','体X','体Y','体Z'][i]}:${params.has(k) ? '有' : '無'}`",
+            'model capability reporting',
+          )
+          replaceOnce(
+            "        drive('ParamEyeROpen', s.rightEye, 0.55)",
+            "        drive('ParamEyeROpen', s.rightEye, 0.55)\n        // Head responds promptly; torso follows a little more slowly.\n        drive('ParamAngleX', s.headX, 0.20)\n        drive('ParamAngleY', s.headY, 0.20)\n        drive('ParamAngleZ', s.headZ, 0.20)\n        drive('ParamBodyAngleX', s.bodyX, 0.10)\n        drive('ParamBodyAngleY', s.bodyY, 0.10)\n        drive('ParamBodyAngleZ', s.bodyZ, 0.10)",
+            'head and torso parameters',
+          )
+          replaceOnce(
+            "        outputFaceBlendshapes: true,",
+            "        outputFaceBlendshapes: true,\n        outputFacialTransformationMatrixes: true,",
+            'facial transform output',
+          )
+          replaceOnce(
+            "              const categories = landmarker.detectForVideo(canvas, now).faceBlendshapes?.[0]?.categories",
+            "              const result = landmarker.detectForVideo(canvas, now)\n              const categories = result.faceBlendshapes?.[0]?.categories",
+            'native frame observation',
+          )
+          replaceOnce(
+            `                scoresRef.current = {
+                            mouth: Math.min(1, score(categories, 'jawOpen') * 1.5),
+                            smile: Math.min(1, score(categories, 'mouthSmileLeft') + score(categories, 'mouthSmileRight')),
+                            leftEye: 1 - score(categories, 'eyeBlinkLeft'),
+                            rightEye: 1 - score(categories, 'eyeBlinkRight'),
+                          }
+                          debugRef.current.mouthTarget = scoresRef.current.mouth
+                        }`,
+            `                const motion = motionRef.current.update(result, now)
+                          if (motion) scoresRef.current = motion
+                          debugRef.current.mouthTarget = scoresRef.current.mouth
+                        } else {
+                          scoresRef.current = motionRef.current.whenMissing(now) ?? scoresRef.current
+                        }`,
+            'native tracking calculation',
+          )
+          replaceOnce(
+            `            if (categories) {
+                        scoresRef.current = {
+                          mouth: Math.max(0, Math.min(1, score(categories, 'jawOpen') * 1.5)),
+                          smile: Math.max(-1, Math.min(1, (score(categories, 'mouthSmileLeft') + score(categories, 'mouthSmileRight')))),
+                          leftEye: 1 - score(categories, 'eyeBlinkLeft'),
+                          rightEye: 1 - score(categories, 'eyeBlinkRight'),
+                        }
+                      }`,
+            `            if (categories) {
+                        const motion = motionRef.current.update(result, now)
+                        if (motion) scoresRef.current = motion
+                      } else {
+                        scoresRef.current = motionRef.current.whenMissing(now) ?? scoresRef.current
+                      }`,
+            'browser tracking calculation',
+          )
+          
+          // Write only after all patterns matched (no partially patched file).
+          writeFileSync(sourcePath, code, 'utf8')
+          console.log('✅ src/FaceTracking.tsx now tracks head XYZ and subtle body XYZ. Existing blink and mouth tracking are retained.')
+          console.log('✅ src/faceMotion.ts is in place. Commit both files, then build and test on iPhone.')
+          PATCH_SCRIPT_99
+          cp /tmp/faceMotion.ts src/faceMotion.ts
+          cp /tmp/apply-face-motion.mjs ./apply-face-motion.mjs
+          node apply-face-motion.mjs
+          rm apply-face-motion.mjs
+          git diff --check
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.1
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+      - name: Build iOS web assets
+        run: pnpm run build:ios
+
+      - name: Commit changed tracking files only
+        shell: bash
+        run: |
+          git add src/FaceTracking.tsx src/faceMotion.ts
+          if git diff --cached --quiet; then
+            echo 'No changes to commit'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat: follow head and upper body with Live2D face tracking'
+          git push
