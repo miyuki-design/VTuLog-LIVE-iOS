@@ -3,6 +3,7 @@ import type { MutableRefObject } from 'react'
 import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision'
 import { Capacitor, registerPlugin } from '@capacitor/core'
 import type { PluginListenerHandle } from '@capacitor/core'
+import { FaceMotionController, REST, type TrackingScores } from './faceMotion'
 
 type FrameEvent = { camera: 'front' | 'rear'; jpeg: string }
 const MultiCam = registerPlugin<{
@@ -12,8 +13,8 @@ const MultiCam = registerPlugin<{
 }>('MultiCam')
 
 type PixiRef = MutableRefObject<any>
-type Scores = { mouth: number; smile: number; leftEye: number; rightEye: number }
-const DEFAULT: Scores = { mouth: 0, smile: 0, leftEye: 1, rightEye: 1 }
+type Scores = TrackingScores
+const DEFAULT: Scores = REST
 
 function score(categories: { categoryName: string; score: number }[], key: string) {
   return categories.find(item => item.categoryName === key)?.score ?? 0
@@ -71,6 +72,7 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
   // iPhone 17 native JPEG orientation: counterclockwise is upright.
   const frontRotationRef = useRef<'clockwise' | 'counterclockwise'>('counterclockwise')
   const scoresRef = useRef<Scores>({ ...DEFAULT })
+  const motionRef = useRef(new FaceMotionController())
   const streamRef = useRef<MediaStream | null>(null)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const landmarkerRef = useRef<FaceLandmarker | null>(null)
@@ -101,6 +103,7 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
     landmarkerRef.current?.close()
     landmarkerRef.current = null
     scoresRef.current = { ...DEFAULT }
+    motionRef.current.reset()
     frontFrameReadyRef.current = false
     frontCanvasRef.current = null
     frontDecodingRef.current = false
@@ -160,9 +163,10 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
         max: raw?.maximumValues?.[i] ?? 1,
       })
     }
-    const keys = ['ParamMouthOpenY', 'ParamMouthForm', 'ParamEyeLOpen', 'ParamEyeROpen']
+    const keys = ['ParamMouthOpenY', 'ParamMouthForm', 'ParamEyeLOpen', 'ParamEyeROpen',
+      'ParamAngleX', 'ParamAngleY', 'ParamAngleZ', 'ParamBodyAngleX', 'ParamBodyAngleY', 'ParamBodyAngleZ']
     debugRef.current.parameters = keys.map((k, i) =>
-      `${['口開','口形','左目','右目'][i]}:${params.has(k) ? '有' : '無'}`
+      `${['口開','口形','左目','右目','頭X','頭Y','頭Z','体X','体Y','体Z'][i]}:${params.has(k) ? '有' : '無'}`
     ).join(' / ')
     const smoothed = new Map<string, number>()
     const drive = (id: string, target: number, alpha: number) => {
@@ -190,6 +194,13 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
         drive('ParamMouthForm', s.smile, 0.36)
         drive('ParamEyeLOpen', s.leftEye, 0.55)
         drive('ParamEyeROpen', s.rightEye, 0.55)
+        // Head responds promptly; torso follows a little more slowly.
+        drive('ParamAngleX', s.headX, 0.20)
+        drive('ParamAngleY', s.headY, 0.20)
+        drive('ParamAngleZ', s.headZ, 0.20)
+        drive('ParamBodyAngleX', s.bodyX, 0.10)
+        drive('ParamBodyAngleY', s.bodyY, 0.10)
+        drive('ParamBodyAngleZ', s.bodyZ, 0.10)
       } catch (error) {
         debugRef.current.error = error instanceof Error ? error.message : String(error)
       }
@@ -234,6 +245,7 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
         runningMode: 'VIDEO',
         numFaces: 1,
         outputFaceBlendshapes: true,
+        outputFacialTransformationMatrixes: true,
       })
       if (generation !== generationRef.current) { landmarker.close(); return }
       landmarkerRef.current = landmarker
@@ -315,7 +327,8 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
             lastAnalyzedRef.current = now
             try {
               debugRef.current.analyzed++
-              const categories = landmarker.detectForVideo(canvas, now).faceBlendshapes?.[0]?.categories
+              const result = landmarker.detectForVideo(canvas, now)
+              const categories = result.faceBlendshapes?.[0]?.categories
               if (categories) {
                 debugRef.current.detected++
                 debugRef.current.lastFaceAt = Date.now()
@@ -326,13 +339,11 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
                 debugRef.current.mouthFunnel = score(categories, 'mouthFunnel')
                 debugRef.current.blendshapeCount = categories.length
                 setMessage(prev => prev.startsWith('表情追跡中') ? prev : '表情追跡中（顔の映像は表示・保存しません）')
-                scoresRef.current = {
-                  mouth: Math.min(1, score(categories, 'jawOpen') * 1.5),
-                  smile: Math.min(1, score(categories, 'mouthSmileLeft') + score(categories, 'mouthSmileRight')),
-                  leftEye: 1 - score(categories, 'eyeBlinkLeft'),
-                  rightEye: 1 - score(categories, 'eyeBlinkRight'),
-                }
+                const motion = motionRef.current.update(result, now)
+                if (motion) scoresRef.current = motion
                 debugRef.current.mouthTarget = scoresRef.current.mouth
+              } else {
+                scoresRef.current = motionRef.current.whenMissing(now) ?? scoresRef.current
               }
             } catch (error) {
               debugRef.current.error = error instanceof Error ? error.message : String(error)
@@ -388,12 +399,10 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
             const result = landmarker.detectForVideo(video, now)
             const categories = result.faceBlendshapes?.[0]?.categories
             if (categories) {
-              scoresRef.current = {
-                mouth: Math.max(0, Math.min(1, score(categories, 'jawOpen') * 1.5)),
-                smile: Math.max(-1, Math.min(1, (score(categories, 'mouthSmileLeft') + score(categories, 'mouthSmileRight')))),
-                leftEye: 1 - score(categories, 'eyeBlinkLeft'),
-                rightEye: 1 - score(categories, 'eyeBlinkRight'),
-              }
+              const motion = motionRef.current.update(result, now)
+              if (motion) scoresRef.current = motion
+            } else {
+              scoresRef.current = motionRef.current.whenMissing(now) ?? scoresRef.current
             }
           } catch (error) { console.warn('Face tracking frame:', error) }
         }
