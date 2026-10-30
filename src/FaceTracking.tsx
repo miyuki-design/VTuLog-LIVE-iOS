@@ -260,6 +260,25 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
       debugRef.current.writes++
     }
     const clamp01 = (x: number) => Math.max(0, Math.min(1, x))
+
+    // Match VTuLog: keep normal blinking, but strengthen deliberate wide-eye poses.
+    const EYE_WIDE_START = 0.75
+    const EYE_WIDE_MAX = 1.9
+    const enhancedEyeTarget = (mapping: (typeof profile)[number], input: number, normalTarget: number) => {
+      if (mapping.Input !== 'EyeOpenLeft' && mapping.Input !== 'EyeOpenRight') return normalTarget
+      const v = clamp01(input)
+      if (v <= EYE_WIDE_START) return normalTarget
+      const lower = mapping.InputRangeLower
+      const upper = mapping.InputRangeUpper
+      const startRate = upper !== lower ? (EYE_WIDE_START - lower) / (upper - lower) : 0
+      const startTarget = mapping.OutputRangeLower
+        + startRate * (mapping.OutputRangeUpper - mapping.OutputRangeLower)
+      const t = clamp01((v - EYE_WIDE_START) / (1 - EYE_WIDE_START))
+      const expressiveT = Math.pow(t, 0.65)
+      const maxSupported = params.get(mapping.OutputLive2D)?.max ?? mapping.OutputRangeUpper
+      const wideTarget = Math.min(EYE_WIDE_MAX, maxSupported)
+      return startTarget + (wideTarget - startTarget) * expressiveT
+    }
     const inputFromFace = (id: string, s: Scores): number | null => {
       switch (id) {
         // Align Cubism pose axes with the user-facing direction (not the selfie preview).
@@ -297,7 +316,8 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
           const target = mapping.OutputLive2D === 'ParamMouthForm'
             ? clamp01(s.smile)
             : mapping.OutputRangeLower + rate * (mapping.OutputRangeUpper - mapping.OutputRangeLower)
-          smooth(mapping.OutputLive2D, target, mapping.Smoothing)
+          const enhancedTarget = enhancedEyeTarget(mapping, value, target)
+          smooth(mapping.OutputLive2D, enhancedTarget, mapping.Smoothing)
         }
         // VTube Studio Auto Breath is driven by Cubism's own breath effect.
         // Don't override ParamBreath: it also drives the model's wings/arm physics.
