@@ -1,4 +1,3 @@
-import { prepareIPhoneRecording, prepareIPhonePlayback } from './nativeAudio'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Capacitor, CapacitorHttp } from '@capacitor/core'
 import { App as CapacitorApp } from '@capacitor/app'
@@ -2638,7 +2637,6 @@ const receiver = new RTCPeerConnection({
     
    receiver.ontrack = event => {
   const remoteStream = event.streams[0]
-  void prepareIPhonePlayback().catch(error => console.warn('iPhone playback route', error))
 
   if (rtcPreviewRef.current && remoteStream) {
     rtcPreviewRef.current.srcObject = remoteStream
@@ -2900,8 +2898,7 @@ await fetch(
 let audioStream: MediaStream | null = null
 
     try {
-      // Native routing only: WHIP/WebRTC must retain the same WebKit audio track.
-      await prepareIPhoneRecording().catch(error => console.warn('iPhone mic route', error))
+      // Use the original WebKit MediaStream; do not reconfigure AVAudioSession.
       audioStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           sampleRate: { ideal: 48000 },
@@ -2913,7 +2910,6 @@ let audioStream: MediaStream | null = null
       })
 
       audioStreamRef.current = audioStream
-      await prepareIPhoneRecording().catch(error => console.warn('iPhone mic route', error))
     } catch {
       setMicError('マイクへのアクセスが拒否されました（映像のみLIVE）')
     }
@@ -3011,7 +3007,6 @@ whipPeerRef.current = null
 
   audioStreamRef.current?.getTracks().forEach(track => track.stop())
   audioStreamRef.current = null
-  void prepareIPhonePlayback().catch(error => console.warn('iPhone playback route', error))
 
   liveStreamRef.current?.getTracks().forEach(track => track.stop())
   liveStreamRef.current = null
