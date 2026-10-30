@@ -1,4 +1,4 @@
-name: Restore WebKit audio (VTuLog-LIVE-iOS)
+name: Restore WebKit audio - finalize (VTuLog-LIVE-iOS)
 
 on:
   workflow_dispatch:
@@ -7,120 +7,88 @@ permissions:
   contents: write
 
 jobs:
-  restore:
+  finalize:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - name: Checkout existing code
+      - name: Checkout current repository code
         uses: actions/checkout@v4
 
-      - name: Apply guarded WebKit audio rollback and preview fix
+      - name: Finish WebKit audio restoration without reapplying patches
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY_RESTORE'
+          python3 - <<'PY_AUDIO_REPAIR'
           from pathlib import Path
-          import base64, zlib, subprocess
-          from sys import exit
-          data = (
-              "eNrtXG13FMeV/q5fUZaz0Uw06hlJIAmBwEKItWJetJLAmyUc1DNdIzXu6R73i2Qt5hzPyMRgIHgdxzbGCTY4hphjsIOTEBvMf9lhBvHJf2Gf"
-              "W1Xd0z0vEnacPfkQHY40011169a9z33tagyzWGQDA0umz/Sshj/LQT676rgvFS1n1cvmA9MyBkzH09ZKFstvNaLHtA3+Chsb3TE6MjKiafnh"
-              "sR3D+g42mMuNbNvWMzAwsPUqPf39/U+x0nPPsYFtOzJjrB+/Rxi+nnTy3ngPa/743PPZQJH1/mRydvbEvpm57F7d45pVdp2T2YO6aWue77hr"
-              "eUd3jd74xLJr2j7m/dLuZbt3x+ZPlsv7uMWXdJ9r3qpZ9BPTCrrPDgaWb07ppVkrWKIFaNCWNAZ+2NIDyaUP6b65wicDw3S+1+rxja/5y449"
-              "zAbYrl19s7+YOrxvui9+v+g6JVbW/WXLzDOzVHZcn83ia3yMuuxyoaKxUVLR2PYuKnqWzQseDV6wdJd77Dknf7KQSkoxvZMFHmem77HD+ZO8"
-              "QNscmGJuYPtmiTNbL3EtwUGR9SUp9DHb8Zlps7L4muRBbFxe1/RymdtGqnV6Oi5rIt8m6/YVBjZfoZ1COoElxy6aS8f6ynrhJX2JT1m65x0w"
-              "Pb/vOJsIabWPP1E0La6tuqbPT/j8FT910nNszQhKZS8lR2QYt73A5Sd0r2CaE/t1y+MZRmZr+xNDadbP+n5p99GogmOY9tJEX+AXB8aSzAmQ"
-              "hltQ3LACsci9cUymf9pJx7RTitN0usfY3NGQrRYtc2nZ7+ppkkOUqxk2thnbC8OaNrY9vz03tn0rV9NCpJuvaRlGSB7dTkge3f4vZ/NP62wG"
-              "c0JHg7nhLkqiH1c34Uzm1zyfl6ZfMYHjGXtFt0yDtdoamXNBx1UTmtOk/WhkUUlr+Je7+Wd3Nx3tJN/xsnIrI7xQ1I1RTTNGh4p8sJh0Kx0n"
-              "SlfS8ZbA5vZRgLKf/mwnbAr+2dGF4ICztNc1jSV+1OSrU47tu45lcXecTU3OdrrBTknZOCvcxW3OioFdaOJ0n2kccHQjlQ7H0Y8XlDkQ3Dam"
-              "OSIvVtqjuXwJaueu5H/G9nzdLvCWgJxKxxC6xcw24NFkMfF0D/4l9HRocmHm6PSJySP7Zg6fODK7b3JhWisZkGrnGz0GnIvPDUYwZCUHslBq"
-              "UrFhRB8aGyxqWk7+KO11IUb6yxp8JWsHlvT4g5mhbaw/l8lBXz0DzyplsQOYzf73tXeYeXhe+UEm9seOlA24OpYayg2NwBkNDA1DTpj5LKvf"
-              "vrpx/Qx9mTwqxs5zzzMdu1a5Uf/VmY13/lxb/32t+kmteqf++mf1M2dr69/Uqn+rrb9TW79fq97C7/obX9ffvFKrvt248Eb99ge116ovPj8z"
-              "m32R5+cWpmqVW7XKHXx+wfRrldsHuWHq877L9dKTq3fr17+orYPiH2vr61gAJGqV32FUrfIt/jXufVyrvCc+XwbR+qX3Hj38uF75CvTqv7r4"
-              "+J2rj9+5icGSzuM/X9j4K1F4UrlXq9yNZtHGBkgetfWLtI31X9Wq12vr79bW36N1q1+Ii3fH2WKXuLH43f2zk0f3O4ENCUIuLMtaBPVaBeKf"
-              "m8ZW76g70zamc/A2O3WwfuYPQjrVRw8eguHv7p8jhn4+j400fv2Hx3/5AEt7biFrN5fXfG+RBi0gcO8Xof7JmYv1e+u19TtC6Pj929r65/iM"
-              "uVtlCIuMVJDcLTh7fPmbJxf+BGVufPZ5rfJw49v7+A3xbTx8UH/zI1pdYurx3W+wr07LJIoeuUq1Wn/rQq3yvpDvZ0Kp99RCccpQUePN34Ms"
-              "bkB7jctVtli29LVJ25jjBcc1FuF9Fw1e1GHbC858mesvcXcRgpZ6jybkERNwubrXCrjvOP4ye37/LOhKUQvwfFarvI4R5iwCOu8M6NcqjQ/P"
-              "Pf7rB0I2+HeFJAQ0C+0IIp8Sker5WgU0LxL8QsQnpgB4Em+wqqbqHl/7euOzi3R5UGP/NQP2boON+u2/Yfq/m/7zQV6I6ncQlbAFMHyrfuli"
-              "4/2PADyIs/7WRVJ39WOxFmT89uMHtxuXrhDb736x8emllrtSzICZYGZIY3IRNlkg9HpYPsYca4cU7fzc+fr535Jj+PgCGd457Pn2zOwkfj+6"
-              "92bjyj0hhRsQhJDvJfBRW/8NLb9+TshIiKx6jQBAwBNk6RYYvRCzzGGNSb2AWOPKV0RGTQWljwHYbKQq2tjNL+uX7tAIwkFCkZgvoQQ8S4iA"
-              "fswnkgeCS4IVwYMQh+HEw4eyh/fvj1uwpPPo3ueNu9fqD67h1qP7X9X/cIncHvF0Vmzn12JHH+Hui5NHiZ9fX8Ws7Mb1DxufX69/e4G0JPQu"
-              "9rlNYx0QRqJ7L1urVGvVN4VkP268+zfyugJcBMzKTRB98salOLUWN5ZwfpU783pRd01Qg8NlCHRllKSOW6veFZB+ILiGP77FFqXgkZ6SvSG9"
-              "Ya4T+HwR3i28FRpYeAfsbNx8n2y5VY8C8Y1PPty4eR/4IICf/cvjr16XrhcQblz7Ui2OwAGH/bvLjz94fePG9cbv34JYF9bKfL7gmmW/ceN8"
-              "4903auuVWvWGigiVm0n4sl9MHjyApRpXyS0Boo13HzTunSXfRZwMgMvfkHd7+4v6tXWJ0ZJeODyf/U9kccDZm7UqBt9V7gDT/3i1VrkgYQw9"
-              "UtwUZb8S2fr/KLsCrsRgKW9Yx6MHHxLvkSV1gvudxoefSRYFJ5cVi2EwvCCx9uTd83Vs/HIVeqE4BfGd+RJ4aYky1beB7I2bn1OEBanqeRjD"
-              "xvqDxms3xAaqwj9drVUrEs2R645FXIDo0UOKr7BoAinFhVuCWYmmuyJA0Doqkke+L4rBSmI3ZNx98to79bNvEBjWv1FQhaCa+L2tYFu5UH94"
-              "ZuPTSlMMyeSqS8WW73Znq/Rq++DoyNDoSFt61YVap/xqcHsswVK1XDMJiC7FM4Po4lSYzZIFZLNhJqbsShcJGRkVmV0/C2wU4gVoGftBvsBK"
-              "ZsF1ymKoaZcDXxM0Fpa5iwseO3xomnnLuovRSYSwouMyfxkLlMssZdoFKxCG/eILABwl6iojS0uChziydFYALpAX6syDI7CN+OLIyX3UR2x1"
-              "mYSsMzmbxfDEnFVYpEkcyuZYm4CRZJaDvGUWoClbt1Rp0TZMVBTyY6ZZXBjyCqoFkdErQlA8M6lIM4smNjDBetvI9bZNOOkd0ku8ZXD7MFmk"
-              "HeSo/g1vnB2LuJKXqOI81iwvWu6mqNs3znpleQnJ9WbgXiFCmzxcbItz4uKs65RQ7qczWxJc4v4cueAfix7KH9cH0n48ek75qclJasfJMlQB"
-              "vUIAFNIvlP4j4AGpaZ/plXW/sCy+pyw9zy0stOIHlrOkyUxZE3akYRIWftmBurTA4+6MbfomKBrp5AIruotSntLycZbI0ve0j/P1sigSUdMa"
-              "YKZIrYFWhkVpKyJj6gSMR1jgeItFptnAbnYMtgIzxD177XiIZdHtEXKJA4p+eoXN946HNLVC4LpAu0CAJm56Wkkvs1PsJzmN3A2JW3P11aM6"
-              "smB2OtNCD/M2ISjvfj+Knl4qW3wOUohRbV5sjj4uP57uKDuP+0pMqSgJGWd7HcfKMM8nKcpvoQLS8G0u6o5NZUowUhxhXlIbmvSaUfkfaxSY"
-              "xVgidCq5XbjK1kqE6SuOaXjC2b4cmFiT627Z5AWO9MlHaJIOVKBDa6P2okm+e5nrhhjmYemSDjcXeHoejpa8OKVdxIrvUv7Vz0rcdx3bKbVS"
-              "o+1S9GsFnnaQQuKEkiPbw7QS16nZVYLiGSxF7ShJDVKIMAI1LTnuGntmgmmJ0oy9+mo0SgRejBB/X321tdHH2DOt9A6XRRZHHUsfe/ZSWqts"
-              "063yFx1scBIBjftTiloqyVpGyYJ+Z5gjl4IXb1vjeDq5xOnk15bVJsVTnZTvBjzdpswXOC+HgT0WOxFbbQRO/NKFpkGGLeueeFCEoElD24Gx"
-              "zxGtU24LHCRqWsRzADvIE3Th3ixrDagxAmQNKp14OdAt019La20qFRhBfJuI9qSv6KZFa8wIb7JHK5qu56dWKcMYT3oBNgH9U6Hvz9gHQeT0"
-              "06hn1uVF7gpTA/0UFu8u79OMw7Y72FzUUlVFSIRIOHmPeVKR2ZgV6chezCXboUd1HjIWAB3ZHWKI9vQoFyt1AHiIoO+NTSIYwjIkEofmj4HE"
-              "020hRYYlNTHd4oRFphYmPbJBGyYsiGQFYCsWu6fwNaFyw2mVAeGr6TwnBAUNKYt00ale2nxvmoDUK4f1tutapKJSW8x3mkqXqaeM9yI3bi6E"
-              "TNgNbBsf2/Ur4zwpzjYt9tOfsme6enf50Agcu5we36Z6o/qf2jCylbB+LSzo7tU/Ode48pUoYy6KouhKrfqb3nQ7TamJTZWrlvUcS+h0rUtE"
-              "jD42w2KriFE/UCGkpCxH9cYb4afJfCDbUx05kBuXTizZT7gd1pu36p982fjte+PslylYtuNqloPJ5n9zYx/3RO1OSOttR+UmsAvT2qdAXUJU"
-              "Et1bxPb01rAP0+CnWH8p0BH5FKwmJKyk3+oEHtEXuyxAcksW92HHpFlL96Z3htZ6Opm+lLmLRPnpMhhNgmM2mtIkpawpRi0hT/CuLbkIJtxo"
-              "eUCX59gliYV2lm6dg8LLbJuSkEGsKXchbNm17J6MJurJxlB2o9nio8GXapWPaG7l9d42PlBzc5/2Zrdxs7XMXg6458+1iA66VAJB2d1u0ImK"
-              "RKOETdO9NcCog0NRbigkdwqWbRW1pGBbvUH40wlWMZHeo6cj1WuiIyqew1QuNM6/XX/r01hTDtK72ttxgdNdHdJzgf2STZmJClJPqeHbjZt/"
-              "fHL5rWaDsrtnPL1ZMRDJ5sezxaYJNj36ja6W1x7XTsD8untlisFNh9whNyRTtvnqtOIzWXOmOgwWpR0GRpNksXcI4bN9MIqEkk6jZYdIVnH7"
-              "xcUU7u0NkFzkWhaRgpMzY+Ua281ymfByYVm3bW5NOQHSJ7rRCaThWKdUcuz9ihPKoAol+W2/5ej+8FDH1K5L3Iljih6aPbhWv3+J4s6db+sP"
-              "P0w2Iv+OmCvFZcrifkEvpxxbyirD8kERWes8Yto425bbMRLKZFz9BQjZsVWkncKaj6vxGeCkk7tAVjPllNeYY1trmkpwfCeARz4y8wJy+Sz7"
-              "+bw8RkJFpMt1a0CcGJPZPCpdJLZaO1mpQ1nlWkWR01vFjLigVIdrkjOtSFqYklf36b6+51jueGgp7QaQQJerl5BFT7AZ20+F1OjaAZidv9xB"
-              "9PB24aQJlttygQKJZoIRV6n8ms+hAcV+BveAvfGQ3M/YQV5COn1AXwPIdwlk7dY8aKkDF8LNhl2kzd0zcZFHJBnZRikr2NHkt2k67cENlVml"
-              "O0/+vrEg4g3lnVlco9Mr3Oauh8xNdK8MyAHFgGqseL3jirXjXdb/Xp5d1BHJhha5q+SA0J02vU/yfrt7DMuTprsS+VSryLpknk1bdKHeFR43"
-              "xQ6b7tyQawud0SZMqwMN6h4xkb0+fVp+LNnsanOex39Qkh13diplrL4dZoqJAPqjJtyqT/vUMZZsRBclJ2SqhJuMtFJIHQMqHOA81kOYd4xA"
-              "PLtjos2wkxwePluBtyx8X3i+ir0ser9Uxot2GLVQfHlRS3TqEmBoEbZktxk5t4bX5tCKbUiRJiHGQd4ZdJs7oe7+o0WwiU5Ji34NbtpmoiPR"
-              "JhvF3J7N5RFfJJwQ3yVutxyGouMqk+Wy5nuvsHz8m3r8NpTjY4P5UU0b2ZEfGSzmkkfU4uPlybT4Ffn0bRvrH8wMx5+9nQKSeBmp/Iwwoblm"
-              "VZy4Phu2Dk7L6NqnxQ/W9PWwiFzg8XkfJpyhT9OIcQVffJzjRfGXjCJBCSG54McpRI/5Ms2Pz/t+OZrxXHSsLQtueXwutst0rzmPvneYppfL"
-              "fUIkQyPDY5lR1o+/o/IEacGBoqk7wM0V8RwMnpjNLUzNcu5OOYilwuhS6qhdj0yQ5GCNTuzR1iaUlU3slkfyQpolx+fqEZ8aAkTQVw85BKGC"
-              "+t+dBY8CS7hB6baIMhF16DCm7tqpvo6HC+iYJQ2n83c9Eskp1y/MunzF5KvQSPjQgpo5cfaio4QdR2sAljyWj23Ep0mR7sjl6Ezu0NgOEi0u"
-              "6as68F3kxH6PdH+ikhRzxhNPPl9l9KyYpE6PjKV4RTyM7LHZwwwf9VIuOM5iZ+NYKRDipla48IUePaSUxwPCTJD0FPk/yWBnQ3hKwVMruFXm"
-              "/RHHR+DdiRHHNZfEA1vFTGzrOykZoD41VUOqcdhac4eHN2Pig6gk97a+Yi7pdGy5RET3QWkF7lE7C4u7YqFU7HyoLiusU/FTt834S+1q00D2"
-              "jJx9LJfL0cMqqdvBYWEuOwZz0ly+jzaVw02Hek1sJI7GifiNf7CSWnKMKK30D5qFaRqT6vsBfYLv7p9tvP9Rff2SOHX5kA5LfXf/XF90DpaE"
-              "OZwbHCRhDudyyvesLptl8jNJWTRNobO49pCSFwjQHuSAXGpahySUJ9qtoC4jT7pnM6GLhf7xXsiC8f7dm+hIJNxDW1RNHgJVoTF5cauzL2ND"
-              "o9u2FYZaz750INTp2Mtw+6mXRKBLHqXOMJ8eEskvYVnzPFI4cNY1CCJ/4a8IymJy7ECGaAdDNqdkbTCOjJXKsGPHdzLZ4YhfiTsBOyjlEQOR"
-              "qZg2mCvqhQTdydkZ6ZebTzqiRzCn1NOZPtnc6YMv6Ath0beTqdb6HgwA2gpc3Jdtnz54iHGmzjXsat3GblovanFvNTDqRccGnuq4RTVcZvKx"
-              "0WQL4p5uGKEmUiJ0HxKnNPqQkgLglro1zuRNEoAqO0Ph0kM+IJkIxuh30vFuygyb6pTZQ2x/IurG8bIrqZTdiZc/6N2SBCXTk3elaYNYhEMt"
-              "vAV796koQ6qMzKB5H4KP3ZqYmGB9puPFsScTbqqLRG3SxV0r9XfU/kR4sVULEmuUwzyT3EI61qJSqZZCvIwZMWFoTai2IjQTgpIilKJEns20"
-              "i07k2VrOddK7KOJDOqmyzaTQ9KX/T/uLzG6zjSVddtu+kMOo7iM9drUdQrzvW3yA2wj3tniIGLXd1IPFRGtW9WFRSGmRlCL5GJy6Qwp6sD/Z"
-              "pgkNB3JSa0+6rr4WuRzIIY9kyqWWFxKfvJqWDqUob2qWaK6xf2Pb2DPURVMHXkRerwK8bBZgZRHd/yyC/dcU2j+/LsL5pfA0sWof9KVjLFCf"
-              "TZUJR+AmxwSTycXFcDqAkhIdaYzO7cSfXSwxCpf6+9OS4DGTDsWp24VlHaWHwSf9lClIqbYALRmXjOz5abKzmG4rL1+c3vvCzIJ6C2Zuen7h"
-              "8Jx62abLnR5aoEs4VFFQ0wbljwiHzagnC9BudCkmUjREMTq4g2Jif/urNol0HZU73E/sPZvhHNJrTHtWvYdDLw329A+wgy2HPMfZ4lMlxmE+"
-              "rGkarGSRpaLTnSzbIVlPa7RYaMlYZNcK0mVnNyZSo0WVIWRTiC2keNpWmpV0W19CipFfUzQFmUOHWQEFC4xnsfUZW/Pcw2J2se0IiLwmTy8s"
-              "yhYH0ZtrFj7KEun49WKn99QWBXMwXNvPYl8uiJS4q8tTHwcwdWgfE1Ff5F/iUAAW6PpKj5jW6a0btqyDjTznNpOdEkNje+kMDnE2NcOit1+Y"
-              "bnmOiMOMIzAb5GqzYbATR7eW9fA8qeBlYdn06NCCzn6m1CR9o0SMOD/8s4yoq3RGb9MJH+cUxemhbN4x1uJbE4Cis+f42tM/qIWvd6mz8p4T"
-              "uHQ0KAWZuYGUMMIBlio7tgwKCqfhftJCIjQ29m6IeMFnJ6yX+gsy6xSkzKjDRCeN6YgR9SZFF5t2SHsg7nE/gBPtH9LYYVudkcrIB9J+HP+0"
-              "8pRQpyZWZ6umvwzZMP4KZElFqLQtvUCHpFGZYmeilQjawxqbp9SJDjAvk6tekI+9sfFfOMFCkOdMNi4yDJswi2shLV/sxBAiFMLPCGVmZHcS"
-              "YZBjiGMXOBbZprGZoqJDwsMcFItF3bQ8elwBSRR8UdZLEySLgoD8QKJTt9ei/w9AlBc7oxPgSsu6JY9b27KqFr0/FHYuOM7a3CcdUcjPW7zk"
-              "hco/5MCDSiN6OTDpzJN4zQEciBcd5GkoGTF9R74BThsuUpmrjA3K04jfAaFnMYPYRulZWOYob8I6H0uvcGVwWck6xNsUB/HnQVYDhvBYAu1H"
-              "bAUSGhCDFNb0aKfKuphAodHMVrwsHAWh2tsJ8AhMizeJdaL7f0XSQTo="
-          )
-          patch = zlib.decompress(base64.b64decode(data)).decode('utf-8')
-          if Path('WEBKIT_AUDIO_RESTORE.md').exists() and not Path('NativeAudioPlugin.swift').exists():
-              print('Already restored; no further patch needed.')
-              exit(0)
-          check = subprocess.run(['git', 'apply', '--check', '-'], input=patch, text=True, capture_output=True)
-          if check.returncode != 0:
-              print('Source differs from the supplied ZIP. Stopping without modifying files.')
-              print(check.stderr)
-              exit(1)
-          subprocess.run(['git', 'apply', '-'], input=patch, text=True, check=True)
-          print('WebKit audio path restored; old AVAudioSession plugin removed.')
-          PY_RESTORE
+
+          RECORDING = False
+
+          app_path = Path('src/App.tsx')
+          if not app_path.is_file():
+              raise SystemExit('src/App.tsx not found. Wrong repository?')
+          app = app_path.read_text(encoding='utf-8')
+
+          # A workflow must not declare success if the actual WebKit rollback wasn't applied.
+          old_calls = ('prepareIPhoneRecording', 'prepareIPhonePlayback', "from './nativeAudio'", 'NativeAudio.configure(')
+          left = [p for p in old_calls if p in app]
+          if left:
+              raise SystemExit('STOP: App.tsx still uses native audio: ' + ', '.join(left) + '. Apply the provided complete source first; no files changed.')
+          if 'navigator.mediaDevices.getUserMedia' not in app:
+              raise SystemExit('STOP: WebKit getUserMedia() not found; no files changed.')
+          if RECORDING:
+              checks = ("'finalizing'", "setAppState('finalizing')", 'mr.onstop', 'previewUrlRef.current')
+              missing = [p for p in checks if p not in app]
+              if missing:
+                  raise SystemExit('STOP: recording preview finalization is not installed: ' + ', '.join(missing) + '. No files changed.')
+
+          # Remove only lines used to install/register the obsolete NativeAudioPlugin.
+          # Re-running this script is safe: already removed lines are simply skipped.
+          bridge = Path('MultiCamPlugin.swift')
+          if not bridge.is_file():
+              raise SystemExit('Missing MultiCamPlugin.swift; not touching this repository.')
+          raw = bridge.read_text(encoding='utf-8')
+          updated = raw.replace('        bridge?.registerPluginInstance(NativeAudioPlugin())\n', '')
+          if updated != raw:
+              bridge.write_text(updated, encoding='utf-8')
+              print('Cleaned MultiCam plugin registration.')
+
+          for filename in ('.github/workflows/build-ios.yml', '.github/workflows/testflight.yml'):
+              file = Path(filename)
+              if not file.is_file():
+                  raise SystemExit(f'Missing {filename}; no legacy plugin deletion will occur.')
+              body = file.read_text(encoding='utf-8')
+              new = body.replace('          printf "\\n" >> "$APP_DIR/AppDelegate.swift"\n          cat NativeAudioPlugin.swift >> "$APP_DIR/AppDelegate.swift"\n', '')
+              new = new.replace("          if 'NativeAudioPlugin' not in plugins:\n              plugins.append('NativeAudioPlugin')\n", '')
+              # In case there are minor indentation changes, reject rather than quietly leave a reference.
+              if 'NativeAudioPlugin' in new or 'NativeAudioPlugin.swift' in new:
+                  raise SystemExit(f'STOP: {filename} still references NativeAudioPlugin. Inspect the workflow before deleting the plugin.')
+              if new != body:
+                  file.write_text(new, encoding='utf-8')
+                  print(f'Cleaned {filename}.')
+
+          # Read the bridge again to verify it no longer requires NativeAudioPlugin.
+          if 'NativeAudioPlugin' in bridge.read_text(encoding='utf-8'):
+              raise SystemExit('STOP: Swift bridge still references NativeAudioPlugin; keeping plugin sources for safety.')
+          for filename in ('NativeAudioPlugin.swift', 'src/nativeAudio.ts', 'NATIVE_AUDIO_UPDATE.md'):
+              p = Path(filename)
+              if p.is_file():
+                  p.unlink()
+                  print('Removed unused file:', filename)
+
+          info = Path('WEBKIT_AUDIO_RESTORE.md')
+          if not info.exists():
+              info.write_text('# WebKit audio restore\n\nAudio is handled by the WebKit MediaStream. The obsolete native audio plugin is not registered.\n\nVerify recording, preview, saving, and live streaming on a real iPhone.\n', encoding='utf-8')
+
+          print('WebKit audio restoration is already present; remaining native plugin references were safely cleaned.')
+          PY_AUDIO_REPAIR
           git diff --check
 
-      - name: Set up pnpm
+      - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 10.11.1
 
-      - name: Set up Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -131,16 +99,16 @@ jobs:
       - name: Verify web build
         run: pnpm run build:ios
 
-      - name: Commit verified restoration
+      - name: Commit cleanup, if needed
         shell: bash
         run: |
           set -euo pipefail
-          git add -A src/App.tsx MultiCamPlugin.swift .github/workflows/build-ios.yml .github/workflows/testflight.yml NativeAudioPlugin.swift src/nativeAudio.ts NATIVE_AUDIO_UPDATE.md WEBKIT_AUDIO_RESTORE.md
+          git add -A
           if git diff --cached --quiet; then
-            echo 'Already up to date.'
+            echo 'Already fixed - no changes to commit.'
             exit 0
           fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'fix: restore WebKit audio routing and protect recording playback'
+          git commit -m 'fix: finalize safe WebKit audio restoration'
           git push
