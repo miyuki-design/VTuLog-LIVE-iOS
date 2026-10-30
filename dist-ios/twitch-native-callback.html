@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Cache-Control" content="no-store">
+  <title>VTuLog LIVE — Twitch連携</title>
+  <style>
+    body { min-height: 100vh; box-sizing: border-box; margin: 0; padding: 36px 22px;
+      font-family: -apple-system,BlinkMacSystemFont,sans-serif; background:#171126; color:#f5eaff;
+      display:flex; justify-content:center; align-items:center; text-align:center; }
+    .card { max-width:500px; padding:32px 24px; border:1px solid #9146ff88; border-radius:20px; background:#26193e; }
+    h1 { font-size:24px; } p { line-height:1.7; color:#d5c5ed; }
+    a { display:block; padding:16px 14px; margin-top:20px; color:#fff; background:#9146ff; border-radius:12px; font-weight:bold; text-decoration:none; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>💜 Twitch連携</h1>
+    <p id="message">認証結果をVTuLog LIVEへ戻しています…</p>
+    <a id="return-link" href="#" hidden>VTuLog LIVEに戻る</a>
+  </main>
+<script>
+(function () {
+  // Twitch returns access_token in the URL fragment. This page never sends it to any server.
+  // Custom-scheme redirect may require a manual tap in some iOS browser configurations.
+  const hash = new URLSearchParams(location.hash.slice(1));
+  const query = new URLSearchParams(location.search);
+  const state = hash.get('state') || query.get('state') || '';
+  const token = hash.get('access_token');
+  const error = hash.get('error') || query.get('error');
+  const message = document.getElementById('message');
+  const link = document.getElementById('return-link');
+  if (!state.startsWith('vtulog-twitch-') || (!token && !error)) {
+    message.textContent = '有効な認証結果がありません。VTuLog LIVEからもう一度連携してください。';
+    history.replaceState(null, '', location.pathname);
+    return;
+  }
+  const callback = new URL('vtuloglive://oauth/callback');
+  callback.hash = location.hash;
+  if (error && !hash.get('error')) callback.searchParams.set('error', error);
+  if (!hash.get('state')) callback.searchParams.set('state', state);
+  link.href = callback.href;
+  link.hidden = false;
+  message.textContent = error ? 'Twitch認証が完了しませんでした。アプリに戻って確認してください。' : '認証結果を受け取りました。下のボタンを押してアプリに戻ってください。';
+  // Remove the token from the visible browser address after the deep link has been prepared.
+  history.replaceState(null, '', location.pathname);
+  // Do not auto-redirect: Safari may block the custom scheme, and user-initiated taps are more reliable.
+})();
+</script>
+</body>
+</html>

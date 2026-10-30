@@ -1,0 +1,24 @@
+{
+  "name": "VTuLog LIVE",
+  "short_name": "VTuLog LIVE",
+  "description": "VTuber向けVlogカメラアプリ",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#C5EEFF",
+  "theme_color": "#FF3FA4",
+  "icons": [
+    {
+      "src": "/VTuLogLIVEicon.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/VTuLogLIVEicon.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
