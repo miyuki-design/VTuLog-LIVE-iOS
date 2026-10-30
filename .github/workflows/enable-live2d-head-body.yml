@@ -259,13 +259,16 @@ jobs:
           node-version: '22'
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
+      # Both plugins are imported by src/App.tsx. Keep aligned with testflight.yml.
+      - name: Install missing Capacitor native OAuth plugins
+        run: pnpm add -E @capacitor/app@7.1.2 @capacitor/browser@7.0.2
       - name: Build iOS web assets
         run: pnpm run build:ios
 
-      - name: Commit changed tracking files only
+      - name: Commit tracking files and dependency manifests
         shell: bash
         run: |
-          git add src/FaceTracking.tsx src/faceMotion.ts
+          git add src/FaceTracking.tsx src/faceMotion.ts package.json pnpm-lock.yaml
           if git diff --cached --quiet; then
             echo 'No changes to commit'
             exit 0
