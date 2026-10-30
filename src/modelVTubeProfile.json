@@ -1,0 +1,167 @@
+[
+  {
+    "Name": "Auto Breath",
+    "Input": "",
+    "InputRangeLower": 0.0,
+    "InputRangeUpper": 1.0,
+    "OutputLive2D": "ParamBreath",
+    "OutputRangeLower": 0.0,
+    "OutputRangeUpper": 1.0,
+    "Smoothing": 0,
+    "UseBreathing": true
+  },
+  {
+    "Name": "Face Left/Right Rotation",
+    "Input": "FaceAngleX",
+    "InputRangeLower": -30.0,
+    "InputRangeUpper": 30.0,
+    "OutputLive2D": "ParamAngleX",
+    "OutputRangeLower": -30.0,
+    "OutputRangeUpper": 30.0,
+    "Smoothing": 15,
+    "UseBreathing": false
+  },
+  {
+    "Name": "Face Up/Down Rotation",
+    "Input": "FaceAngleY",
+    "InputRangeLower": -20.0,
+    "InputRangeUpper": 20.0,
+    "OutputLive2D": "ParamAngleY",
+    "OutputRangeLower": -30.0,
+    "OutputRangeUpper": 30.0,
+    "Smoothing": 15,
+    "UseBreathing": false
+  },
+  {
+    "Name": "Face Lean Rotation",
+    "Input": "FaceAngleZ",
+    "InputRangeLower": -30.0,
+    "InputRangeUpper": 30.0,
+    "OutputLive2D": "ParamAngleZ",
+    "OutputRangeLower": -30.0,
+    "OutputRangeUpper": 30.0,
+    "Smoothing": 30,
+    "UseBreathing": false
+  },
+  {
+    "Name": "Body Rotation X",
+    "Input": "FaceAngleX",
+    "InputRangeLower": -30.0,
+    "InputRangeUpper": 30.0,
+    "OutputLive2D": "ParamBodyAngleX",
+    "OutputRangeLower": -10.0,
+    "OutputRangeUpper": 10.0,
+    "Smoothing": 20,
+    "UseBreathing": false
+  },
+  {
+    "Name": "Body Rotation Y",
+    "Input": "FaceAngleY",
+    "InputRangeLower": -30.0,
+    "InputRangeUpper": 30.0,
+    "OutputLive2D": "ParamBodyAngleY",
+    "OutputRangeLower": -10.0,
+    "OutputRangeUpper": 10.0,
+    "Smoothing": 20,
+    "UseBreathing": false
+  },
+  {
+    "Name": "Body Rotation Z",
+    "Input": "FaceAngleZ",
+    "InputRangeLower": -30.0,
+    "InputRangeUpper": 30.0,
+    "OutputLive2D": "ParamBodyAngleZ",
+    "OutputRangeLower": -10.0,
+    "OutputRangeUpper": 10.0,
+    "Smoothing": 20,
+    "UseBreathing": false
+  },
+  {
+    "Name": "Eye Open Left",
+    "Input": "EyeOpenLeft",
+    "InputRangeLower": 0.0,
+    "InputRangeUpper": 1.0,
+    "OutputLive2D": "ParamEyeLOpen",
+    "OutputRangeLower": 0.0,
+    "OutputRangeUpper": 1.899999976158142,
+    "Smoothing": 10,
+    "UseBreathing": false
+  },
+  {
+    "Name": "Eye Open Right",
+    "Input": "EyeOpenRight",
+    "InputRangeLower": 0.0,
+    "InputRangeUpper": 1.0,
+    "OutputLive2D": "ParamEyeROpen",
+    "OutputRangeLower": 0.0,
+    "OutputRangeUpper": 1.899999976158142,
+    "Smoothing": 10,
+    "UseBreathing": false
+  },
+  {
+    "Name": "Eye X",
+    "Input": "EyeRightX",
+    "InputRangeLower": -1.0,
+    "InputRangeUpper": 1.0,
+    "OutputLive2D": "ParamEyeBallX",
+    "OutputRangeLower": 1.0,
+    "OutputRangeUpper": -1.0,
+    "Smoothing": 8,
+    "UseBreathing": false
+  },
+  {
+    "Name": "Eye Y",
+    "Input": "EyeRightY",
+    "InputRangeLower": -1.0,
+    "InputRangeUpper": 1.0,
+    "OutputLive2D": "ParamEyeBallY",
+    "OutputRangeLower": -1.0,
+    "OutputRangeUpper": 1.0,
+    "Smoothing": 8,
+    "UseBreathing": false
+  },
+  {
+    "Name": "Brow Form Left",
+    "Input": "Brows",
+    "InputRangeLower": 0.0,
+    "InputRangeUpper": 1.0,
+    "OutputLive2D": "ParamBrowLForm",
+    "OutputRangeLower": -1.0,
+    "OutputRangeUpper": 1.0,
+    "Smoothing": 15,
+    "UseBreathing": false
+  },
+  {
+    "Name": "Brow Form Right",
+    "Input": "Brows",
+    "InputRangeLower": 0.0,
+    "InputRangeUpper": 1.0,
+    "OutputLive2D": "ParamBrowRForm",
+    "OutputRangeLower": -1.0,
+    "OutputRangeUpper": 1.0,
+    "Smoothing": 15,
+    "UseBreathing": false
+  },
+  {
+    "Name": "Mouth Smile",
+    "Input": "MouthSmile",
+    "InputRangeLower": 0.0,
+    "InputRangeUpper": 1.0,
+    "OutputLive2D": "ParamMouthForm",
+    "OutputRangeLower": -1.0,
+    "OutputRangeUpper": 1.0,
+    "Smoothing": 0,
+    "UseBreathing": false
+  },
+  {
+    "Name": "Mouth Open",
+    "Input": "MouthOpen",
+    "InputRangeLower": 0.0,
+    "InputRangeUpper": 1.0,
+    "OutputLive2D": "ParamMouthOpenY",
+    "OutputRangeLower": 0.0,
+    "OutputRangeUpper": 2.0999999046325684,
+    "Smoothing": 0,
+    "UseBreathing": false
+  }
+]

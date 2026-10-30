@@ -4,6 +4,7 @@ import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision'
 import { Capacitor, registerPlugin } from '@capacitor/core'
 import type { PluginListenerHandle } from '@capacitor/core'
 import { FaceMotionController, REST, type TrackingScores } from './faceMotion'
+import modelVTubeProfile from './modelVTubeProfile.json'
 
 type FrameEvent = { camera: 'front' | 'rear'; jpeg: string }
 const MultiCam = registerPlugin<{
@@ -157,10 +158,11 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
       const rawId = raw?.ids?.[i] ?? (typeof core.getParameterId === 'function' ? core.getParameterId(i) : null)
       if (rawId == null) continue
       const id = typeof rawId?.getString === 'function' ? rawId.getString() : String(rawId)
+      const fallbackRange = /^(ParamAngle[XYZ]|ParamBodyAngle[XYZ])$/.test(id) ? 30 : 1
       params.set(id, {
         index: i,
-        min: raw?.minimumValues?.[i] ?? -1,
-        max: raw?.maximumValues?.[i] ?? 1,
+        min: raw?.minimumValues?.[i] ?? (typeof core.getParameterMinimumValue === 'function' ? core.getParameterMinimumValue(i) : -fallbackRange),
+        max: raw?.maximumValues?.[i] ?? (typeof core.getParameterMaximumValue === 'function' ? core.getParameterMaximumValue(i) : fallbackRange),
       })
     }
     const keys = ['ParamMouthOpenY', 'ParamMouthForm', 'ParamEyeLOpen', 'ParamEyeROpen',
@@ -168,45 +170,147 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
     debugRef.current.parameters = keys.map((k, i) =>
       `${['口開','口形','左目','右目','頭X','頭Y','頭Z','体X','体Y','体Z'][i]}:${params.has(k) ? '有' : '無'}`
     ).join(' / ')
+    // Pose parameters existing in moc3 does not prove the rig has deformers
+    // attached to them. Keep writing real Cubism params and ALSO give the
+    // model a restrained visible whole-avatar follow-through in Pixi. This is
+    // not 3D turning and cannot substitute for a properly rigged Live2D head.
+    const basePosition = { x: model.position.x, y: model.position.y }
+    const basePivot = { x: model.pivot.x, y: model.pivot.y }
+    const baseRotation = model.rotation
+    const baseScale = { x: model.scale.x, y: model.scale.y }
+    let visualReady = false
+    let anchorX = basePosition.x
+    let anchorY = basePosition.y
+    let modelWidth = 0
+    let modelHeight = 0
+    let displayX = 0
+    let displayY = 0
+    let displayRotation = 0
+    try {
+      let bounds = model.getLocalBounds()
+      if (!bounds || !(bounds.width > 0 && bounds.height > 0)) {
+        // Some Live2D renderers report a zero local-bounds rectangle.
+        const w = model.width / Math.max(Math.abs(baseScale.x), 0.0001)
+        const h = model.height / Math.max(Math.abs(baseScale.y), 0.0001)
+        bounds = { x: 0, y: 0, width: w, height: h }
+      }
+      if (bounds && [bounds.x, bounds.y, bounds.width, bounds.height,
+        basePosition.x, basePosition.y, baseScale.x, baseScale.y, baseRotation].every(Number.isFinite)
+        && bounds.width > 0 && bounds.height > 0) {
+        // Shift pivot to model centre while preserving its original position.
+        const centerX = bounds.x + bounds.width / 2
+        const centerY = bounds.y + bounds.height / 2
+        const px = (centerX - basePivot.x) * baseScale.x
+        const py = (centerY - basePivot.y) * baseScale.y
+        const cosine = Math.cos(baseRotation)
+        const sine = Math.sin(baseRotation)
+        anchorX += px * cosine - py * sine
+        anchorY += px * sine + py * cosine
+        modelWidth = bounds.width * Math.abs(baseScale.x)
+        modelHeight = bounds.height * Math.abs(baseScale.y)
+        model.pivot.set(centerX, centerY)
+        model.position.set(anchorX, anchorY)
+        visualReady = true
+      }
+    } catch (error) {
+      console.warn('Live2D visual follow-through unavailable:', error)
+    }
+    const applyVisual = (s: Scores) => {
+      if (!visualReady) return
+      // Always-on whole-avatar follow-through.
+      // Small body sway with an expressive tilt, smoothed in rendering frames.
+      // Keep these independent of the user's avatar placement and zoom.
+      // Front-camera coordinates are mirrored relative to the viewer.
+      // Correct horizontal translation and tilt, preserving the established
+      // vertical direction (positive screen Y points downward).
+      const targetX = -modelWidth * (
+        (s.headX / 30) * 0.014 + (s.bodyX / 18) * 0.014)
+      const targetY = modelHeight * (
+        -(s.headY / 30) * 0.014 - (s.bodyY / 12) * 0.014)
+      const targetRotation = -Math.max(-10, Math.min(10, s.headZ * 0.20)) * Math.PI / 180
+      displayX += (targetX - displayX) * 0.15
+      displayY += (targetY - displayY) * 0.15
+      displayRotation += (targetRotation - displayRotation) * 0.17
+      model.position.set(anchorX + displayX, anchorY + displayY)
+      model.rotation = baseRotation + displayRotation
+    }
+    const restoreVisual = () => {
+      if (!visualReady || model.destroyed) return
+      model.pivot.set(basePivot.x, basePivot.y)
+      model.position.set(basePosition.x, basePosition.y)
+      model.rotation = baseRotation
+    }
+    // This exact model is configured in VTube Studio with 15 direct inputs.
+    // The remaining hair, wing, fabric, earrings and arm parameters are
+    // outputs of Miminoz様.physics3.json; they MUST NOT be overridden here.
+    const profile = modelVTubeProfile
     const smoothed = new Map<string, number>()
-    const drive = (id: string, target: number, alpha: number) => {
+    const smooth = (id: string, target: number, fpsSmoothing: number) => {
       const param = params.get(id)
       if (!param) return
       const previous = smoothed.get(id) ?? (raw?.values?.[param.index] ?? target)
+      const alpha = fpsSmoothing === 0 ? 1 : 1 - Math.exp(-60 / (fpsSmoothing * 4.5))
       const value = Math.max(param.min, Math.min(param.max, previous + (target - previous) * alpha))
       smoothed.set(id, value)
       if (typeof core.setParameterValueByIndex === 'function') {
         core.setParameterValueByIndex(param.index, value)
       } else if (raw?.values) {
         raw.values[param.index] = value
-      } else {
-        debugRef.current.error = 'Live2Dパラメータの書き込みAPIがありません'
-        return
       }
       debugRef.current.writes++
     }
+    const clamp01 = (x: number) => Math.max(0, Math.min(1, x))
+    const inputFromFace = (id: string, s: Scores): number | null => {
+      switch (id) {
+        // Align Cubism pose axes with the user-facing direction (not the selfie preview).
+        case 'FaceAngleX': return s.headX
+        case 'FaceAngleY': return -s.headY
+        case 'FaceAngleZ': return -s.headZ
+        case 'EyeOpenLeft': return clamp01(s.leftEye)
+        case 'EyeOpenRight': return clamp01(s.rightEye)
+        case 'EyeRightX': return Math.max(-1, Math.min(1, s.headX / 30))
+        case 'EyeRightY': return Math.max(-1, Math.min(1, -s.headY / 30))
+        case 'Brows': return clamp01((s.leftEye + s.rightEye) * 0.5)
+        case 'MouthSmile': return clamp01(s.smile)
+        case 'MouthOpen': return clamp01(s.mouth)
+        default: return null
+      }
+    }
+    // afterMotionUpdate occurs before Cubism physics and before the final
+    // coreModel.update(). This lets the 27 native physics groups read the
+    // head/eye/mouth inputs in the SAME frame, without overwriting their outputs.
     const apply = () => {
       if (!runningRef.current) return
       debugRef.current.modelUpdates++
       const s = scoresRef.current
       try {
-        drive('ParamMouthOpenY', s.mouth, 0.90)
-        drive('ParamMouthForm', s.smile, 0.36)
-        drive('ParamEyeLOpen', s.leftEye, 0.55)
-        drive('ParamEyeROpen', s.rightEye, 0.55)
-        // Head responds promptly; torso follows a little more slowly.
-        drive('ParamAngleX', s.headX, 0.20)
-        drive('ParamAngleY', s.headY, 0.20)
-        drive('ParamAngleZ', s.headZ, 0.20)
-        drive('ParamBodyAngleX', s.bodyX, 0.10)
-        drive('ParamBodyAngleY', s.bodyY, 0.10)
-        drive('ParamBodyAngleZ', s.bodyZ, 0.10)
+        for (const mapping of profile) {
+          if (mapping.UseBreathing || !mapping.Input) continue
+          const value = inputFromFace(mapping.Input, s)
+          if (value == null) continue
+          const lower = mapping.InputRangeLower
+          const upper = mapping.InputRangeUpper
+          const rate = upper !== lower ? (value - lower) / (upper - lower) : 0
+          // Keep VTube Studio eye X output mapping while compensating the camera input axis.
+          // A relaxed mouth should be neutral (0), not the VTube Studio slider's -1 endpoint.
+          // Otherwise a normal resting face looks pursed or puckered.
+          const target = mapping.OutputLive2D === 'ParamMouthForm'
+            ? clamp01(s.smile)
+            : mapping.OutputRangeLower + rate * (mapping.OutputRangeUpper - mapping.OutputRangeLower)
+          smooth(mapping.OutputLive2D, target, mapping.Smoothing)
+        }
+        // VTube Studio Auto Breath is driven by Cubism's own breath effect.
+        // Don't override ParamBreath: it also drives the model's wings/arm physics.
+        applyVisual(s)
       } catch (error) {
         debugRef.current.error = error instanceof Error ? error.message : String(error)
       }
     }
-    internal.on('beforeModelUpdate', apply)
-    return () => { try { internal.off?.('beforeModelUpdate', apply) } catch { /* destroyed */ } }
+    internal.on('afterMotionUpdate', apply)
+    return () => {
+      try { internal.off?.('afterMotionUpdate', apply) } catch { /* destroyed */ }
+      try { restoreVisual() } catch { /* destroyed */ }
+    }
   }, [pixiAppRef, state])
 
   useEffect(() => () => {
