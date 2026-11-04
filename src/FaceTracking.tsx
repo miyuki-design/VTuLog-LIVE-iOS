@@ -272,7 +272,7 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
         case 'EyeRightX': return Math.max(-1, Math.min(1, s.eyeX))
         case 'EyeRightY': return Math.max(-1, Math.min(1, s.eyeY))
         case 'Brows': return clamp01((s.leftEye + s.rightEye) * 0.5)
-        case 'MouthSmile': return clamp01(s.smile)
+        case 'MouthSmile': return Math.max(-1, Math.min(1, s.smile))
         case 'MouthOpen': return clamp01(s.mouth)
         default: return null
       }
