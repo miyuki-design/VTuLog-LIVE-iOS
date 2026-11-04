@@ -247,7 +247,7 @@ export class FaceMotionController {
       // The previous 1.65 gain seldom reached either endpoint on an iPhone.
       // Iris / blendshape fusion stays independent of head rotation.
       const centredX = clamp((gaze.x - this.neutralGaze.x) * 15.0, -1, 1)
-      const centredY = clamp((gaze.y - this.neutralGaze.y) * 3.5, -1, 1)
+      const centredY = clamp((gaze.y - this.neutralGaze.y) * 2.5, -1, 1)
       const targetX = Math.abs(centredX) < 0.045 ? 0 : centredX
       const targetY = clamp(
   (Math.abs(centredY) < 0.045 ? 0 : centredY) - 0.55,
