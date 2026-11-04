@@ -296,7 +296,7 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
           // A relaxed mouth should be neutral (0), not the VTube Studio slider's -1 endpoint.
           // Otherwise a normal resting face looks pursed or puckered.
           const target = mapping.OutputLive2D === 'ParamMouthForm'
-            ? clamp(s.smile, -1, 1)
+            ? Math.max(-1, Math.min(1, s.smile))
             : mapping.OutputRangeLower + rate * (mapping.OutputRangeUpper - mapping.OutputRangeLower)
           smooth(mapping.OutputLive2D, target, mapping.Smoothing)
         }
