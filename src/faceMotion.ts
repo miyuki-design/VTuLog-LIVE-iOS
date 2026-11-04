@@ -225,8 +225,8 @@ export class FaceMotionController {
       // Map ordinary gaze excursions to the FULL -1..+1 model eye-ball range.
       // The previous 1.65 gain seldom reached either endpoint on an iPhone.
       // Iris / blendshape fusion stays independent of head rotation.
-      const centredX = clamp((gaze.x - this.neutralGaze.x) * 10.0, -1, 1)
-      const centredY = clamp((gaze.y - this.neutralGaze.y) * 10.0, -1, 1)
+      const centredX = clamp((gaze.x - this.neutralGaze.x) * 3.5, -1, 1)
+      const centredY = clamp((gaze.y - this.neutralGaze.y) * 4.0, -1, 1)
       const targetX = Math.abs(centredX) < 0.045 ? 0 : centredX
       const targetY = Math.abs(centredY) < 0.045 ? 0 : centredY
       // Smooth the measured gaze, without introducing an on-screen control.
@@ -241,8 +241,15 @@ export class FaceMotionController {
 
     this.lastSeen = now
     return {
-      mouth: clamp(get('jawOpen') * 1.5, 0, 1),
-      smile: clamp(get('mouthSmileLeft') + get('mouthSmileRight'), -1, 1),
+      // Increase jaw-opening sensitivity while retaining the model's 0..2.1 output cap.
+      mouth: clamp(get('jawOpen') * 2.4, 0, 1),
+      // Japanese 'i' has a horizontally stretched mouth even without a big smile.
+      // Fuse smile and mouth-stretch blendshapes instead of relying on smile alone.
+      // Keep a relaxed mouth at 0 so it does not become puckered at rest.
+      smile: clamp(Math.max(
+        (get('mouthSmileLeft') + get('mouthSmileRight')) * 1.25,
+        (get('mouthStretchLeft') + get('mouthStretchRight')) * 1.8,
+      ), 0, 1),
       // EyeBlink alone saturates at 1 while the eyes are merely open.
       // EyeWide is a separate MediaPipe blendshape for deliberate widening.
       // Normal open ~0.53 maps to ~1.0 on this model's 0..1.9 range.
