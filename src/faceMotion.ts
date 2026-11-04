@@ -302,14 +302,14 @@ export class FaceMotionController {
       // Normal open ~0.53 maps to ~1.0 on this model's 0..1.9 range.
       // Full deliberate widening maps to 1.9; blinks still reach 0.
       leftEye: clamp(
-  (1 - leftBlink) *
-  (0.53 + 0.47 * clamp(get('eyeWideLeft') * 2.0, 0, 1)),
+  (1 - clamp((get('eyeBlinkLeft') - 0.08) * 2.0, 0, 1)) *
+  (0.85 + 0.15 * clamp(get('eyeWideLeft') * 2.0, 0, 1)),
   0, 1
 ),
 
 rightEye: clamp(
-  (1 - rightBlink) *
-  (0.53 + 0.47 * clamp(get('eyeWideRight') * 2.0, 0, 1)),
+  (1 - clamp((get('eyeBlinkRight') - 0.08) * 2.0, 0, 1)) *
+  (0.85 + 0.15 * clamp(get('eyeWideRight') * 2.0, 0, 1)),
   0, 1
 ),
       headX, headY, headZ, bodyX, bodyY, bodyZ,
