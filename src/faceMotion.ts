@@ -250,7 +250,7 @@ export class FaceMotionController {
       const centredY = clamp((gaze.y - this.neutralGaze.y) * 3.5, -1, 1)
       const targetX = Math.abs(centredX) < 0.045 ? 0 : centredX
       const targetY = clamp(
-  (Math.abs(centredY) < 0.045 ? 0 : centredY) - 0.40,
+  (Math.abs(centredY) < 0.045 ? 0 : centredY) - 0.55,
   -1, 1
 )
       // Smooth the measured gaze, without introducing an on-screen control.
