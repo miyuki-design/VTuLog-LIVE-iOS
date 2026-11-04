@@ -145,12 +145,32 @@ function readGaze(result: Result, get: (id: string) => number): Gaze | null {
   return blend ?? iris
 }
 
+
+/**
+ * Estimate eyelid closure from the eye's vertical aperture relative to its width.
+ * Blendshapes can be unreliable with glasses and low-resolution front frames.
+ * We combine this independent geometric measurement with eyeBlink scores.
+ */
+function eyeAperture(points: ReadonlyArray<Landmark> | undefined,
+  outer: number, inner: number, top: number, bottom: number): number | null {
+  if (!points) return null
+  const a = points[outer], b = points[inner], t = points[top], d = points[bottom]
+  if (!a || !b || !t || !d ||
+    !finite(a.x, a.y, b.x, b.y, t.x, t.y, d.x, d.y)) return null
+  const dx = b.x - a.x, dy = b.y - a.y
+  const width = Math.hypot(dx, dy)
+  if (width < 0.022) return null
+  // Project eyelid gap perpendicular to the eye's local horizontal axis.
+  return Math.abs((d.x - t.x) * -dy + (d.y - t.y) * dx) / (width * width)
+}
+
 export class FaceMotionController {
   private neutral: Pose | null = null
   private calibrationFrames = 0
   private neutralGaze: Gaze | null = null
   private gazeCalibrationFrames = 0
   private gazeSmooth: Gaze = { x: 0, y: 0 }
+  private eyelidOpenReference = { left: 0, right: 0 }
   private lastGazeSeen = 0
   private lastSeen = 0
   private lastPoseSeen = 0
@@ -162,6 +182,7 @@ export class FaceMotionController {
     this.neutralGaze = null
     this.gazeCalibrationFrames = 0
     this.gazeSmooth = { x: 0, y: 0 }
+    this.eyelidOpenReference = { left: 0, right: 0 }
     this.lastGazeSeen = 0
     this.lastSeen = 0
     this.lastPoseSeen = 0
@@ -242,6 +263,27 @@ export class FaceMotionController {
       this.gazeSmooth.y *= 0.75
     }
 
+    // Fuse landmark-based lid closure with MediaPipe's eyeBlink blendshapes.
+    // 362/263 is the person's left eye; 33/133 is the person's right eye.
+    const points = result.faceLandmarks?.[0]
+    const leftAperture = eyeAperture(points, 362, 263, 386, 374)
+    const rightAperture = eyeAperture(points, 33, 133, 159, 145)
+    const blinkStrength = (side: 'left' | 'right', aperture: number | null, blend: number) => {
+      const byBlendshape = clamp(blend * 2.5, 0, 1)
+      if (aperture == null) return byBlendshape
+      // Track a slowly decaying open-eye reference, not a fixed threshold.
+      // Blink scores below 0.15 indicate a useful open-eye calibration frame.
+      const previous = this.eyelidOpenReference[side]
+      const reference = Math.max(previous * 0.999, aperture, 0.10)
+      if (blend < 0.15 || previous === 0) this.eyelidOpenReference[side] = reference
+      const open = this.eyelidOpenReference[side] || reference
+      // A gap below 45% of normal is fully closed, above 90% is open.
+      const byLidGap = clamp((0.90 - aperture / open) / 0.45, 0, 1)
+      return Math.max(byBlendshape, byLidGap)
+    }
+    const leftBlink = blinkStrength('left', leftAperture, get('eyeBlinkLeft'))
+    const rightBlink = blinkStrength('right', rightAperture, get('eyeBlinkRight'))
+
     this.lastSeen = now
     return {
       // Increase jaw-opening sensitivity while retaining the model's 0..2.1 output cap.
@@ -260,13 +302,13 @@ export class FaceMotionController {
       // Normal open ~0.53 maps to ~1.0 on this model's 0..1.9 range.
       // Full deliberate widening maps to 1.9; blinks still reach 0.
       leftEye: clamp(
-  (1 - clamp(get('eyeBlinkLeft') * 2.5, 0, 1)) *
+  (1 - leftBlink) *
   (0.53 + 0.47 * clamp(get('eyeWideLeft') * 2.0, 0, 1)),
   0, 1
 ),
 
 rightEye: clamp(
-  (1 - clamp(get('eyeBlinkRight') * 2.5, 0, 1)) *
+  (1 - rightBlink) *
   (0.53 + 0.47 * clamp(get('eyeWideRight') * 2.0, 0, 1)),
   0, 1
 ),

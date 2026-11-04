@@ -298,7 +298,15 @@ export function FaceTracking({ pixiAppRef, rearStreamRef, onRearCameraInterrupte
           const target = mapping.OutputLive2D === 'ParamMouthForm'
             ? Math.max(-1, Math.min(1, s.smile))
             : mapping.OutputRangeLower + rate * (mapping.OutputRangeUpper - mapping.OutputRangeLower)
-          smooth(mapping.OutputLive2D, target, mapping.Smoothing)
+          // Closing a blink should not be delayed by VTube Studio's 10-frame
+          // eye-open smoothing. Retain normal smoothing for reopening.
+          const isEyelid = mapping.OutputLive2D === 'ParamEyeLOpen' ||
+            mapping.OutputLive2D === 'ParamEyeROpen'
+          const previousEye = params.get(mapping.OutputLive2D)
+          const previousValue = previousEye ? (smoothed.get(mapping.OutputLive2D) ??
+            (raw?.values?.[previousEye.index] ?? target)) : target
+          smooth(mapping.OutputLive2D, target,
+            isEyelid && target < previousValue ? 0 : mapping.Smoothing)
         }
         // VTube Studio Auto Breath is driven by Cubism's own breath effect.
         // Don't override ParamBreath: it also drives the model's wings/arm physics.
