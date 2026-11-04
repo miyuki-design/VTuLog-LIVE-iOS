@@ -242,14 +242,16 @@ export class FaceMotionController {
     this.lastSeen = now
     return {
       // Increase jaw-opening sensitivity while retaining the model's 0..2.1 output cap.
-      mouth: clamp(get('jawOpen') * 2.4, 0, 1),
+      mouth: clamp(get('jawOpen') * 1.5, 0, 1),
       // Japanese 'i' has a horizontally stretched mouth even without a big smile.
       // Fuse smile and mouth-stretch blendshapes instead of relying on smile alone.
       // Keep a relaxed mouth at 0 so it does not become puckered at rest.
       smile: clamp(Math.max(
         (get('mouthSmileLeft') + get('mouthSmileRight')) * 1.25,
-        (get('mouthStretchLeft') + get('mouthStretchRight')) * 1.8,
-      ), 0, 1),
+        (get('mouthStretchLeft') + get('mouthStretchRight')) * 3.0,
+      ) - get('mouthPucker') * 1.5,
+  -1, 1
+),
       // EyeBlink alone saturates at 1 while the eyes are merely open.
       // EyeWide is a separate MediaPipe blendshape for deliberate widening.
       // Normal open ~0.53 maps to ~1.0 on this model's 0..1.9 range.
