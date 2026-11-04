@@ -338,6 +338,9 @@ export function useLive2D() {
       const fileArray = normalizedFiles as any
       fileArray.settings = settings
       const model = await (Live2DModel as any).from(fileArray, { autoInteract: false })
+      // Disable Cubism's automatic eye blinking: facial tracking owns the eyelids.
+      // autoInteract: false does not disable automatic blinking.
+      if (model.internalModel) model.internalModel.eyeBlink = undefined
       app.stage.addChild(model)
 
       await new Promise<void>(r => requestAnimationFrame(() => r()))
