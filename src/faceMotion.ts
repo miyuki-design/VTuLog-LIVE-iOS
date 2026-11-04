@@ -242,7 +242,7 @@ export class FaceMotionController {
     this.lastSeen = now
     return {
       // Increase jaw-opening sensitivity while retaining the model's 0..2.1 output cap.
-      mouth: clamp(get('jawOpen') * 1.5, 0, 1),
+      mouth: clamp(get('jawOpen') * 2.4, 0, 1),
       // Japanese 'i' has a horizontally stretched mouth even without a big smile.
       // Fuse smile and mouth-stretch blendshapes instead of relying on smile alone.
       // Keep a relaxed mouth at 0 so it does not become puckered at rest.
