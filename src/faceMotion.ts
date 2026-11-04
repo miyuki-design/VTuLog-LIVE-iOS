@@ -225,8 +225,8 @@ export class FaceMotionController {
       // Map ordinary gaze excursions to the FULL -1..+1 model eye-ball range.
       // The previous 1.65 gain seldom reached either endpoint on an iPhone.
       // Iris / blendshape fusion stays independent of head rotation.
-      const centredX = clamp((gaze.x - this.neutralGaze.x) * 3.5, -1, 1)
-      const centredY = clamp((gaze.y - this.neutralGaze.y) * 4.0, -1, 1)
+      const centredX = clamp((gaze.x - this.neutralGaze.x) * 10.0, -1, 1)
+      const centredY = clamp((gaze.y - this.neutralGaze.y) * 10.0, -1, 1)
       const targetX = Math.abs(centredX) < 0.045 ? 0 : centredX
       const targetY = Math.abs(centredY) < 0.045 ? 0 : centredY
       // Smooth the measured gaze, without introducing an on-screen control.
